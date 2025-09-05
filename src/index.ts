@@ -1,16 +1,16 @@
 /**
- * Agent-03 RoomService & Maintenance Tool
+ * Agent-03 RoomService & Maintenance Tool (Supabase-backed)
  *
- * AI Spine tool que orquesta pedidos de A&B y tickets de mantenimiento:
+ * Orquesta pedidos de A&B y tickets de mantenimiento:
  * - Clasificación (food | beverage | maintenance)
  * - Políticas (ventana de acceso, DND, límite de gasto)
- * - Despacho/estado e historial básico (in-memory demo)
+ * - Despacho/estado e historial (persistente en Supabase)
  *
  * @fileoverview Main tool implementation for agent-03-roomservice-maintenance
- * @author
  * @since 1.0.0
  */
 
+import 'dotenv/config';
 import {
   createTool,
   stringField,
@@ -18,10 +18,13 @@ import {
   booleanField,
   apiKeyField,
 } from '@ai-spine/tools';
+import { createClient } from '@supabase/supabase-js';
 
 /* =======================
    Tipos de entrada/config
    ======================= */
+type TicketStatus = 'CREADO' | 'ACEPTADA' | 'EN_PROCESO' | 'COMPLETADA';
+
 interface AgentInput {
   action?: 'create' | 'assign' | 'status' | 'complete' | 'feedback';
   guest_id: string;
@@ -53,15 +56,170 @@ interface AgentConfig {
   // overrides opcionales desde config/env
   accessWindowStart?: string;
   accessWindowEnd?: string;
-  api_key?: string;       // por si el template lo requiere
-  default_count?: number; // ignorado en este agente; dejado por compat.
+  api_key?: string; // compat template
+  default_count?: number; // compat template
+}
+
+/* =======================
+   Supabase Client
+   ======================= */
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    '⚠️  Falta SUPABASE_URL o SUPABASE_SERVICE_ROLE en .env — el servidor arrancará, pero las operaciones DB fallarán.'
+  );
+}
+
+const supabase = createClient(SUPABASE_URL ?? '', SUPABASE_SERVICE_ROLE ?? '');
+
+/* =======================
+   Utilidades de dominio
+   ======================= */
+const nowISO = () => new Date().toISOString();
+
+const classify = (
+  text?: string,
+  items?: Array<{ name: string }>,
+  explicit?: 'food' | 'beverage' | 'maintenance'
+): 'food' | 'beverage' | 'maintenance' => {
+  if (explicit) return explicit;
+  const blob = `${text ?? ''} ${(items ?? []).map(i => i.name).join(' ')}`.toLowerCase();
+  if (/(repair|leak|broken|fuga|mantenimiento|plomer|reparar)/i.test(blob)) return 'maintenance';
+  if (/(beer|vino|coca|bebida|agua|jugo|drink)/i.test(blob)) return 'beverage';
+  return 'food';
+};
+
+const mapArea = (t: 'food' | 'beverage' | 'maintenance') =>
+  t === 'maintenance' ? 'maintenance' : t === 'beverage' ? 'bar' : 'kitchen';
+
+const withinWindow = (
+  nowStr: string | undefined,
+  win: { start: string; end: string } | undefined,
+  cfg: { start?: string; end?: string },
+  dnd?: boolean
+) => {
+  if (dnd) return false;
+  const start = win?.start ?? cfg.start;
+  const end = win?.end ?? cfg.end;
+  if (!start || !end) return true;
+  const now = nowStr ? new Date(nowStr) : new Date();
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  const cur = `${hh}:${mm}:${ss}`;
+  return start <= cur && cur <= end;
+};
+
+const enforceSpend = (
+  items?: Array<{ qty?: number; price?: number }>,
+  profile?: { daily_spend?: number; spend_limit?: number }
+) => {
+  const total = (items ?? []).reduce((a, i) => a + (i.price ?? 0) * (i.qty ?? 1), 0);
+  const daily = profile?.daily_spend ?? 0;
+  const limit = profile?.spend_limit ?? Infinity;
+  return { ok: daily + total <= limit, total };
+};
+
+const crossSell = (items?: Array<{ name: string }>) => {
+  const names = new Set((items ?? []).map(i => i.name.toLowerCase()));
+  const s: string[] = [];
+  if (names.has('hamburguesa')) s.push('brownie');
+  if (names.has('pizza')) s.push('vino tinto');
+  if (names.has('ensalada')) s.push('agua mineral');
+  return s;
+};
+
+/* =======================
+   Acceso a datos (Supabase)
+   Tablas esperadas:
+   - tickets(id text pk, guest_id, room, type, area, status, priority, items jsonb, notes, created_at, updated_at)
+   - ticket_history(id bigserial, request_id fk, status, actor, note, ts)
+   ======================= */
+
+async function dbCreateTicket(t: {
+  id: string;
+  guest_id: string;
+  room: string;
+  type: string;
+  area: string;
+  items?: any;
+  notes?: string;
+  priority?: string;
+  status: TicketStatus;
+}) {
+  const { error } = await supabase.from('tickets').insert({
+    id: t.id,
+    guest_id: t.guest_id,
+    room: t.room,
+    type: t.type,
+    area: t.area,
+    items: t.items ?? null,
+    notes: t.notes ?? null,
+    priority: t.priority ?? 'normal',
+    status: t.status,
+    created_at: nowISO(),
+    updated_at: nowISO(),
+  });
+  if (error) throw error;
+}
+
+async function dbUpdateTicket(
+  id: string,
+  patch: Partial<{ status: TicketStatus; area: string; notes: string }>
+) {
+  const { error } = await supabase
+    .from('tickets')
+    .update({ ...patch, updated_at: nowISO() })
+    .eq('id', id);
+  if (error) throw error;
+}
+
+async function dbGetTicket(id: string) {
+  const { data, error } = await supabase
+    .from('tickets')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
+  if (error) throw error;
+  return data as
+    | {
+        id: string;
+        guest_id: string;
+        room: string;
+        type: 'food' | 'beverage' | 'maintenance';
+        area: string;
+        status: TicketStatus;
+        items?: any;
+        notes?: string;
+        priority?: string;
+      }
+    | null;
+}
+
+async function dbAddHistory(rec: {
+  request_id: string;
+  status: TicketStatus | string;
+  actor: string;
+  note?: string;
+}) {
+  const { error } = await supabase.from('ticket_history').insert({
+    request_id: rec.request_id,
+    status: rec.status,
+    actor: rec.actor,
+    note: rec.note ?? null,
+    ts: nowISO(),
+  });
+  if (error) throw error;
 }
 
 /* =======================
    Implementación del Tool
    ======================= */
-const myAwesomeToolTool = createTool<AgentInput, AgentConfig>({
-  // 1) METADATA — nombre único, versión, descripción, capabilities
+const tool = createTool<AgentInput, AgentConfig>({
+  // 1) METADATA
   metadata: {
     name: 'agent-03-roomservice-maintenance',
     version: '1.0.0',
@@ -72,7 +230,7 @@ const myAwesomeToolTool = createTool<AgentInput, AgentConfig>({
     license: 'MIT',
   },
 
-  // 2) SCHEMA — valida input y config (tipos, requeridos, enums, defaults)
+  // 2) SCHEMA
   schema: {
     input: {
       action: {
@@ -139,7 +297,6 @@ const myAwesomeToolTool = createTool<AgentInput, AgentConfig>({
       request_id: stringField({ required: false }),
     },
 
-    // Config opcional (env/overrides)
     config: {
       accessWindowStart: stringField({ required: false }),
       accessWindowEnd: stringField({ required: false }),
@@ -153,65 +310,8 @@ const myAwesomeToolTool = createTool<AgentInput, AgentConfig>({
     },
   },
 
-  // 3) EXECUTE — lógica de negocio del agente
+  // 3) EXECUTE
   async execute(input, config, context) {
-    // -------- helpers --------
-    const nowISO = () => new Date().toISOString();
-
-    const classify = (
-      text?: string,
-      items?: Array<{ name: string }>,
-      explicit?: 'food' | 'beverage' | 'maintenance',
-    ): 'food' | 'beverage' | 'maintenance' => {
-      if (explicit) return explicit;
-      const blob = `${text ?? ''} ${(items ?? []).map(i => i.name).join(' ')}`.toLowerCase();
-      if (/(repair|leak|broken|fuga|mantenimiento|plomer|reparar)/i.test(blob)) return 'maintenance';
-      if (/(beer|vino|coca|bebida|agua|jugo|drink)/i.test(blob)) return 'beverage';
-      return 'food';
-    };
-
-    const mapArea = (t: 'food' | 'beverage' | 'maintenance') =>
-      t === 'maintenance' ? 'maintenance' : t === 'beverage' ? 'bar' : 'kitchen';
-
-    const withinWindow = (
-      nowStr: string | undefined,
-      win: { start: string; end: string } | undefined,
-      dnd?: boolean,
-    ) => {
-      if (dnd) return false;
-      if (!win && !(config.accessWindowStart && config.accessWindowEnd)) return true;
-      const windowEff = win ?? { start: config.accessWindowStart!, end: config.accessWindowEnd! };
-      const now = nowStr ? new Date(nowStr) : new Date();
-      const hh = String(now.getHours()).padStart(2, '0');
-      const mm = String(now.getMinutes()).padStart(2, '0');
-      const ss = String(now.getSeconds()).padStart(2, '0');
-      const cur = `${hh}:${mm}:${ss}`;
-      return windowEff.start <= cur && cur <= windowEff.end;
-    };
-
-    const enforceSpend = (
-      items?: Array<{ qty?: number; price?: number }>,
-      profile?: { daily_spend?: number; spend_limit?: number },
-    ) => {
-      const total = (items ?? []).reduce((a, i) => a + (i.price ?? 0) * (i.qty ?? 1), 0);
-      const daily = profile?.daily_spend ?? 0;
-      const limit = profile?.spend_limit ?? Infinity;
-      return { ok: daily + total <= limit, total };
-    };
-
-    const crossSell = (items?: Array<{ name: string }>) => {
-      const names = new Set((items ?? []).map(i => i.name.toLowerCase()));
-      const s: string[] = [];
-      if (names.has('hamburguesa')) s.push('brownie');
-      if (names.has('pizza')) s.push('vino tinto');
-      if (names.has('ensalada')) s.push('agua mineral');
-      return s;
-    };
-
-    // -------- storage demo (in-memory) --------
-    (globalThis as any)._TICKETS_ ??= new Map<string, any>();
-    const TICKETS: Map<string, any> = (globalThis as any)._TICKETS_;
-
     const {
       action = 'create',
       guest_id,
@@ -237,104 +337,145 @@ const myAwesomeToolTool = createTool<AgentInput, AgentConfig>({
       };
     }
 
-    // --- CREATE ---
-    if (action === 'create') {
-      const type = classify(text, items, explicitType);
-      const area = mapArea(type);
+    try {
+      // --- CREATE ---
+      if (action === 'create') {
+        const type = classify(text, items, explicitType);
+        const area = mapArea(type);
 
-      if (type === 'food' || type === 'beverage') {
-        if (!withinWindow(now, access_window, do_not_disturb)) {
+        if (type === 'food' || type === 'beverage') {
+          const okWindow = withinWindow(
+            now,
+            access_window,
+            {
+              start: config.accessWindowStart,
+              end: config.accessWindowEnd,
+            },
+            do_not_disturb
+          );
+          if (!okWindow) {
+            return {
+              status: 'error',
+              error: { code: 'ACCESS_WINDOW_BLOCK', message: 'Fuera de ventana o DND activo' },
+            };
+          }
+          const spend = enforceSpend(items, guest_profile);
+          if (!spend.ok) {
+            return {
+              status: 'error',
+              error: { code: 'SPEND_LIMIT', message: 'Límite de gasto excedido' },
+            };
+          }
+        }
+
+        if (type === 'maintenance' && !issue) {
           return {
             status: 'error',
-            error: { code: 'ACCESS_WINDOW_BLOCK', message: 'Fuera de ventana o DND activo' },
+            error: { code: 'MISSING_ISSUE', message: 'Describe el issue de mantenimiento' },
           };
         }
-        const spend = enforceSpend(items, guest_profile);
-        if (!spend.ok) {
-          return {
-            status: 'error',
-            error: { code: 'SPEND_LIMIT', message: 'Límite de gasto excedido' },
-          };
-        }
-      }
 
-      if (type === 'maintenance' && !issue) {
+        const id = `REQ-${Date.now()}`;
+
+        // CREADO
+        await dbCreateTicket({
+          id,
+          guest_id,
+          room,
+          type,
+          area,
+          items,
+          notes,
+          priority,
+          status: 'CREADO',
+        });
+        await dbAddHistory({ request_id: id, status: 'CREADO', actor: 'system' });
+
+        // ACEPTADA (auto)
+        await dbUpdateTicket(id, { status: 'ACEPTADA' });
+        await dbAddHistory({ request_id: id, status: 'ACEPTADA', actor: area });
+
+        const suggestions = type !== 'maintenance' ? crossSell(items) : [];
         return {
-          status: 'error',
-          error: { code: 'MISSING_ISSUE', message: 'Describe el issue de mantenimiento' },
+          status: 'success',
+          data: { request_id: id, type, area, status: 'ACEPTADA', suggestions },
         };
       }
 
-      const id = `REQ-${Date.now()}`;
-      const ticket = {
-        id,
-        guest_id,
-        room,
-        type,
-        area,
-        items,
-        notes,
-        priority,
-        status: 'CREADO' as const,
-        history: [{ status: 'CREADO', actor: 'system', timestamp: nowISO() }],
-      };
-      TICKETS.set(id, ticket);
+      // --- Acciones que requieren request_id ---
+      if (!request_id) {
+        return {
+          status: 'error',
+          error: { code: 'MISSING_REQUEST_ID', message: 'request_id es requerido' },
+        };
+      }
 
-      ticket.status = 'ACEPTADA';
-      ticket.history.push({ status: 'ACEPTADA', actor: area, timestamp: nowISO() });
+      const t = await dbGetTicket(request_id);
+      if (!t) {
+        return { status: 'error', error: { code: 'NOT_FOUND', message: 'No existe el ticket' } };
+      }
 
-      const suggestions = type !== 'maintenance' ? crossSell(items) : [];
+      if (action === 'status') {
+        await dbUpdateTicket(request_id, { status: 'EN_PROCESO' });
+        await dbAddHistory({ request_id, status: 'EN_PROCESO', actor: t.area });
+        return {
+          status: 'success',
+          data: { request_id, type: t.type, area: t.area, status: 'EN_PROCESO' },
+        };
+      }
 
-      return {
-        status: 'success',
-        data: { request_id: id, type, area, status: ticket.status, suggestions },
-      };
-    }
+      if (action === 'complete') {
+        await dbUpdateTicket(request_id, { status: 'COMPLETADA' });
+        await dbAddHistory({ request_id, status: 'COMPLETADA', actor: t.area });
+        return {
+          status: 'success',
+          data: { request_id, type: t.type, area: t.area, status: 'COMPLETADA' },
+        };
+      }
 
-    if (!request_id) {
+      if (action === 'assign') {
+        const newArea = mapArea(t.type); // aquí podrías decidir reasignar diferente si lo deseas
+        await dbUpdateTicket(request_id, { area: newArea });
+        await dbAddHistory({
+          request_id,
+          status: t.status,
+          actor: newArea,
+          note: 'Reassigned',
+        });
+        return {
+          status: 'success',
+          data: { request_id, type: t.type, area: newArea, status: t.status },
+        };
+      }
+
+      if (action === 'feedback') {
+        await dbAddHistory({
+          request_id,
+          status: t.status,
+          actor: 'guest',
+          note: 'Feedback',
+        });
+        return {
+          status: 'success',
+          data: {
+            request_id,
+            type: t.type,
+            area: t.area,
+            status: t.status,
+            message: 'Feedback recibido',
+          },
+        };
+      }
+
+      return { status: 'error', error: { code: 'UNKNOWN_ACTION', message: 'Acción no soportada' } };
+    } catch (e: any) {
+      // eslint-disable-next-line no-console
+      console.error('DB error:', e?.message || e);
       return {
         status: 'error',
-        error: { code: 'MISSING_REQUEST_ID', message: 'request_id es requerido' },
+        error: { code: 'INTERNAL_DB_ERROR', message: String(e?.message || e) },
       };
     }
-    const t = TICKETS.get(request_id);
-    if (!t) {
-      return { status: 'error', error: { code: 'NOT_FOUND', message: 'No existe el ticket' } };
-    }
-
-    if (action === 'status') {
-      t.status = 'EN_PROCESO';
-      t.history.push({ status: 'EN_PROCESO', actor: t.area, timestamp: nowISO() });
-      return { status: 'success', data: { request_id, type: t.type, area: t.area, status: t.status } };
-    }
-
-    if (action === 'complete') {
-      t.status = 'COMPLETADA';
-      t.history.push({ status: 'COMPLETADA', actor: t.area, timestamp: nowISO() });
-      return { status: 'success', data: { request_id, type: t.type, area: t.area, status: t.status } };
-    }
-
-    if (action === 'assign') {
-      t.area = mapArea(t.type);
-      t.history.push({ status: t.status, actor: t.area, timestamp: nowISO(), note: 'Reassigned' });
-      return { status: 'success', data: { request_id, type: t.type, area: t.area, status: t.status } };
-    }
-
-    if (action === 'feedback') {
-      t.history.push({ status: t.status, actor: 'guest', timestamp: nowISO(), note: 'Feedback' });
-      return {
-        status: 'success',
-        data: {
-          request_id,
-          type: t.type,
-          area: t.area,
-          status: t.status,
-          message: 'Feedback recibido',
-        },
-      };
-    }
-
-    return { status: 'error', error: { code: 'UNKNOWN_ACTION', message: 'Acción no soportada' } };
   },
 });
 
@@ -343,8 +484,8 @@ const myAwesomeToolTool = createTool<AgentInput, AgentConfig>({
    ======================= */
 async function main() {
   try {
-    await myAwesomeToolTool.start({
-      port: process.env.PORT ? parseInt(process.env.PORT) : 3000,
+    await tool.start({
+      port: process.env.PORT ? parseInt(process.env.PORT, 10) : 3000,
       host: process.env.HOST || '0.0.0.0',
       development: {
         requestLogging: process.env.NODE_ENV === 'development',
@@ -359,7 +500,7 @@ async function main() {
 
     console.log('🚀 Agent-03 tool server started');
     console.log(`🔗 Health:  http://localhost:${process.env.PORT || 3000}/health`);
-    console.log(`🔗 Execute: http://localhost:${process.env.PORT || 3000}/execute`);
+    console.log(`🔗 Execute: http://localhost:${process.env.PORT || 3000}/api/execute`);
   } catch (error) {
     console.error('Failed to start tool server:', error);
     process.exit(1);
@@ -369,12 +510,12 @@ async function main() {
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('\n🔄 SIGINT -> shutting down...');
-  await myAwesomeToolTool.stop();
+  await tool.stop();
   process.exit(0);
 });
 process.on('SIGTERM', async () => {
   console.log('🔄 SIGTERM -> shutting down...');
-  await myAwesomeToolTool.stop();
+  await tool.stop();
   process.exit(0);
 });
 
@@ -382,4 +523,4 @@ if (require.main === module) {
   main();
 }
 
-export default myAwesomeToolTool;
+export default tool;

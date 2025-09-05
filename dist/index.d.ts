@@ -1,15 +1,15 @@
 /**
- * Agent-03 RoomService & Maintenance Tool
+ * Agent-03 RoomService & Maintenance Tool (Supabase-backed)
  *
- * AI Spine tool que orquesta pedidos de A&B y tickets de mantenimiento:
+ * Orquesta pedidos de A&B y tickets de mantenimiento:
  * - Clasificación (food | beverage | maintenance)
  * - Políticas (ventana de acceso, DND, límite de gasto)
- * - Despacho/estado e historial básico (in-memory demo)
+ * - Despacho/estado e historial (persistente en Supabase)
  *
  * @fileoverview Main tool implementation for agent-03-roomservice-maintenance
- * @author
  * @since 1.0.0
  */
+import 'dotenv/config';
 interface AgentInput {
     action?: 'create' | 'assign' | 'status' | 'complete' | 'feedback';
     guest_id: string;
@@ -44,6 +44,6 @@ interface AgentConfig {
     api_key?: string;
     default_count?: number;
 }
-declare const myAwesomeToolTool: import("@ai-spine/tools-core").Tool<AgentInput, AgentConfig>;
-export default myAwesomeToolTool;
+declare const tool: import("@ai-spine/tools-core").Tool<AgentInput, AgentConfig>;
+export default tool;
 //# sourceMappingURL=index.d.ts.map
