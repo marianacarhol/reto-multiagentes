@@ -17,6 +17,7 @@ import {
   numberField,
   booleanField,
   apiKeyField,
+  type ToolExecutionResult,
 } from '@ai-spine/tools';
 import { createClient } from '@supabase/supabase-js';
 
@@ -98,7 +99,7 @@ const mapArea = (t: 'food' | 'beverage' | 'maintenance') =>
 const withinWindow = (
   nowStr: string | undefined,
   win: { start: string; end: string } | undefined,
-  cfg: { start?: string; end?: string },
+  cfg: { start?: string | undefined; end?: string | undefined },
   dnd?: boolean
 ) => {
   if (dnd) return false;
@@ -243,18 +244,22 @@ const tool = createTool<AgentInput, AgentConfig>({
       guest_id: stringField({ required: true }),
       room: stringField({ required: true }),
       text: stringField({ required: false }),
-      type: { type: 'string', enum: ['food', 'beverage', 'maintenance'], required: false },
+      type: { 
+        type: 'string', 
+        enum: ['food', 'beverage', 'maintenance'], 
+        required: false 
+      },
       items: {
         type: 'array',
         required: false,
         items: {
           type: 'object',
+          required: true,
           properties: {
             name: stringField({ required: true }),
             qty: numberField({ required: false, min: 1, default: 1 }),
             price: numberField({ required: false, min: 0 }),
           },
-          required: ['name'],
         },
       },
       notes: stringField({ required: false }),
@@ -288,18 +293,21 @@ const tool = createTool<AgentInput, AgentConfig>({
           start: stringField({ required: true, description: 'HH:MM:SS' }),
           end: stringField({ required: true, description: 'HH:MM:SS' }),
         },
-        required: ['start', 'end'],
       },
 
       issue: stringField({ required: false }),
-      severity: { type: 'string', enum: ['low', 'medium', 'high'], required: false },
+      severity: { 
+        type: 'string', 
+        enum: ['low', 'medium', 'high'], 
+        required: false 
+      },
 
       request_id: stringField({ required: false }),
     },
 
     config: {
-      accessWindowStart: stringField({ required: false }),
-      accessWindowEnd: stringField({ required: false }),
+      accessWindowStart: { type: 'string', required: false },
+      accessWindowEnd: { type: 'string', required: false },
       api_key: apiKeyField({ required: false, description: 'API key opcional' }),
       default_count: {
         type: 'number',
@@ -311,7 +319,7 @@ const tool = createTool<AgentInput, AgentConfig>({
   },
 
   // 3) EXECUTE
-  async execute(input, config, context) {
+  async execute(input, config): Promise<ToolExecutionResult> {
     const {
       action = 'create',
       guest_id,
@@ -326,14 +334,17 @@ const tool = createTool<AgentInput, AgentConfig>({
       guest_profile,
       access_window,
       issue,
-      severity,
       request_id,
     } = input;
 
     if (!guest_id || !room) {
       return {
         status: 'error',
-        error: { code: 'VALIDATION_ERROR', message: 'guest_id y room son requeridos' },
+        error: { 
+          code: 'VALIDATION_ERROR', 
+          message: 'guest_id y room son requeridos',
+          type: 'validation_error'
+        },
       };
     }
 
@@ -344,26 +355,35 @@ const tool = createTool<AgentInput, AgentConfig>({
         const area = mapArea(type);
 
         if (type === 'food' || type === 'beverage') {
+          const configWindow: { start?: string | undefined; end?: string | undefined } = {
+            start: config.accessWindowStart,
+            end: config.accessWindowEnd,
+          };
           const okWindow = withinWindow(
             now,
             access_window,
-            {
-              start: config.accessWindowStart,
-              end: config.accessWindowEnd,
-            },
+            configWindow,
             do_not_disturb
           );
           if (!okWindow) {
             return {
               status: 'error',
-              error: { code: 'ACCESS_WINDOW_BLOCK', message: 'Fuera de ventana o DND activo' },
+              error: { 
+                code: 'ACCESS_WINDOW_BLOCK', 
+                message: 'Fuera de ventana o DND activo',
+                type: 'validation_error'
+              },
             };
           }
           const spend = enforceSpend(items, guest_profile);
           if (!spend.ok) {
             return {
               status: 'error',
-              error: { code: 'SPEND_LIMIT', message: 'Límite de gasto excedido' },
+              error: { 
+                code: 'SPEND_LIMIT', 
+                message: 'Límite de gasto excedido',
+                type: 'validation_error'
+              },
             };
           }
         }
@@ -371,7 +391,11 @@ const tool = createTool<AgentInput, AgentConfig>({
         if (type === 'maintenance' && !issue) {
           return {
             status: 'error',
-            error: { code: 'MISSING_ISSUE', message: 'Describe el issue de mantenimiento' },
+            error: { 
+              code: 'MISSING_ISSUE', 
+              message: 'Describe el issue de mantenimiento',
+              type: 'validation_error'
+            },
           };
         }
 
@@ -384,8 +408,8 @@ const tool = createTool<AgentInput, AgentConfig>({
           room,
           type,
           area,
-          items,
-          notes,
+          ...(items && { items }),
+          ...(notes && { notes }),
           priority,
           status: 'CREADO',
         });
@@ -406,13 +430,24 @@ const tool = createTool<AgentInput, AgentConfig>({
       if (!request_id) {
         return {
           status: 'error',
-          error: { code: 'MISSING_REQUEST_ID', message: 'request_id es requerido' },
+          error: { 
+            code: 'MISSING_REQUEST_ID', 
+            message: 'request_id es requerido',
+            type: 'validation_error'
+          },
         };
       }
 
       const t = await dbGetTicket(request_id);
       if (!t) {
-        return { status: 'error', error: { code: 'NOT_FOUND', message: 'No existe el ticket' } };
+        return { 
+          status: 'error', 
+          error: { 
+            code: 'NOT_FOUND', 
+            message: 'No existe el ticket',
+            type: 'validation_error'
+          } 
+        };
       }
 
       if (action === 'status') {
@@ -434,7 +469,7 @@ const tool = createTool<AgentInput, AgentConfig>({
       }
 
       if (action === 'assign') {
-        const newArea = mapArea(t.type); // aquí podrías decidir reasignar diferente si lo deseas
+        const newArea = mapArea(t.type);
         await dbUpdateTicket(request_id, { area: newArea });
         await dbAddHistory({
           request_id,
@@ -467,13 +502,24 @@ const tool = createTool<AgentInput, AgentConfig>({
         };
       }
 
-      return { status: 'error', error: { code: 'UNKNOWN_ACTION', message: 'Acción no soportada' } };
+      return { 
+        status: 'error', 
+        error: { 
+          code: 'UNKNOWN_ACTION', 
+          message: 'Acción no soportada',
+          type: 'validation_error'
+        } 
+      };
     } catch (e: any) {
       // eslint-disable-next-line no-console
       console.error('DB error:', e?.message || e);
       return {
         status: 'error',
-        error: { code: 'INTERNAL_DB_ERROR', message: String(e?.message || e) },
+        error: { 
+          code: 'INTERNAL_DB_ERROR', 
+          message: String(e?.message || e),
+          type: 'execution_error'
+        },
       };
     }
   },
