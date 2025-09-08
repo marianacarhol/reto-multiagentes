@@ -485,7 +485,7 @@ const tool = createTool<AgentInput, AgentConfig>({
 async function main() {
   try {
     await tool.start({
-      port: process.env.PORT ? parseInt(process.env.PORT, 10) : 3000,
+      port: process.env.PORT ? parseInt(process.env.PORT, 10) : 3001,
       host: process.env.HOST || '0.0.0.0',
       development: {
         requestLogging: process.env.NODE_ENV === 'development',
@@ -499,8 +499,8 @@ async function main() {
     });
 
     console.log('🚀 Agent-03 tool server started');
-    console.log(`🔗 Health:  http://localhost:${process.env.PORT || 3000}/health`);
-    console.log(`🔗 Execute: http://localhost:${process.env.PORT || 3000}/api/execute`);
+    console.log(`🔗 Health:  http://localhost:${process.env.PORT || 3001}/health`);
+    console.log(`🔗 Execute: http://localhost:${process.env.PORT || 3001}/api/execute`);
   } catch (error) {
     console.error('Failed to start tool server:', error);
     process.exit(1);
