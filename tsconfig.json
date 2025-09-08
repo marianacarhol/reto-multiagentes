@@ -83,11 +83,11 @@
     "excludeDirectories": ["**/node_modules", "**/dist", "**/coverage"]
   },
   "ts-node": {
-    "esm": true,
+    "esm": false,
     "transpileOnly": true,
     "files": true,
     "compilerOptions": {
-      "module": "ESNext",
+      "module": "CommonJS",
       "target": "ES2022"
     }
   }
