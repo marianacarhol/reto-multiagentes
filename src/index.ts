@@ -85,6 +85,18 @@ const supabase = createClient(
    ======================= */
 const nowISO = () => new Date().toISOString();
 
+const pad2 = (n: number) => String(n).padStart(2, '0');
+
+const hhmm = (nowStr?: string) => {
+  const d = nowStr ? new Date(nowStr) : new Date();
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+};
+
+const isInRange = (cur: string, start: string, end: string) => {
+  // soporta rangos cruzando medianoche
+  return start <= end ? (cur >= start && cur <= end) : (cur >= start || cur <= end);
+};
+
 const classify = (
   text?: string,
   items?: Array<{ name: string }>,
@@ -118,15 +130,17 @@ const withinWindow = (
   return start <= cur && cur <= end;
 };
 
-const enforceSpend = (
-  items?: Array<{ qty?: number; price?: number }>,
-  profile?: { daily_spend?: number; spend_limit?: number }
-) => {
-  const total = (items ?? []).reduce((a, i) => a + (i.price ?? 0) * (i.qty ?? 1), 0);
-  const daily = profile?.daily_spend ?? 0;
-  const limit = profile?.spend_limit ?? Infinity;
-  return { ok: daily + total <= limit, total };
-};
+const sumItems = (items?: Array<{qty?:number; price?:number}>) =>
+  (items ?? []).reduce((a,i)=> a + (i.price ?? 0) * (i.qty ?? 1), 0);
+
+async function dbGetGuestSpendLimit(guest_id: string){
+  const { data, error } = await supabase.from('guests')
+    .select('spend_limit')
+    .eq('id', guest_id)
+    .maybeSingle();
+  if (error) throw error;
+  return data?.spend_limit as number | null | undefined;
+}
 
 // menú: vista unificada
 type MenuRow = {
@@ -396,16 +410,36 @@ const tool = createTool<AgentInput, AgentConfig>({
           const okWindow = withinWindow(
             now,
             access_window,
-            {
-              start: config.accessWindowStart,
-              end: config.accessWindowEnd,
-            },
+            { start: config.accessWindowStart, end: config.accessWindowEnd },
             do_not_disturb
           );
           if (!okWindow) {
             return {
               status: 'error',
               error: { code: 'ACCESS_WINDOW_BLOCK', message: 'Fuera de ventana o DND activo' },
+            };
+          }
+
+          // --- Límite de gasto (idéntico a B) ---
+          const chosen = items ?? [];
+          const total = sumItems(chosen);
+          const dailySpend = guest_profile?.daily_spend ?? 0;
+
+          // prioridad: perfil inline > BD guests > sin límite
+          let spendLimit = guest_profile?.spend_limit;
+          if (spendLimit == null) {
+            const fromDb = await dbGetGuestSpendLimit(guest_id);
+            if (typeof fromDb === 'number') spendLimit = Number(fromDb);
+          }
+
+          if (spendLimit != null && (dailySpend + total) > spendLimit) {
+            return {
+              status: 'error',
+              error: {
+                code: 'SPEND_LIMIT',
+                message: 'Límite de gasto excedido',
+                details: { dailySpend, orderTotal: total, spendLimit }
+              },
             };
           }
           const spend = enforceSpend(items, guest_profile);
