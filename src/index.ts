@@ -173,6 +173,29 @@ async function rbAddHistory(h: {request_id: string; status: string; actor: strin
 }
 
 
+// Mantenimiento (M)
+async function mCreateTicket(row: {
+  id: string; guest_id: string; room: string; issue: string; severity?: string;
+  status: TicketStatus; priority: string; notes?: string;
+}){
+  const { error } = await supabase.from('tickets_m').insert(row);
+  if (error) throw error;
+}
+async function mUpdateTicket(id: string, patch: Partial<{status: TicketStatus; priority:string; notes:string}>){
+  const { error } = await supabase.from('tickets_m')
+    .update({ ...patch, updated_at: nowISO() }).eq('id', id);
+  if (error) throw error;
+}
+async function mGetTicket(id: string){
+  const { data, error } = await supabase.from('tickets_m').select('*').eq('id', id).maybeSingle();
+  if (error) throw error;
+  return data as any | null;
+}
+async function mAddHistory(h: {request_id: string; status: string; actor: string; note?: string}){
+  const { error } = await supabase.from('ticket_history_m').insert({ ...h, ts: nowISO() });
+  if (error) throw error;
+}
+
 // Cross-sell: toma ids desde cross_sell_items del menú base de cada item elegido
 function pickCrossSellFromUnion(menu: MenuRow[], chosen: Array<{id?:string; name:string; restaurant?:'rest1'|'rest2'}>, prefer: 'rest1'|'rest2'){
   const chosenIds = new Set(
