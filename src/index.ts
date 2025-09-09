@@ -128,21 +128,27 @@ const enforceSpend = (
   return { ok: daily + total <= limit, total };
 };
 
-const crossSell = (items?: Array<{ name: string }>) => {
-  const names = new Set((items ?? []).map(i => i.name.toLowerCase()));
-  const s: string[] = [];
-  if (names.has('hamburguesa')) s.push('brownie');
-  if (names.has('pizza')) s.push('vino tinto');
-  if (names.has('ensalada')) s.push('agua mineral');
-  return s;
+// menú: vista unificada
+type MenuRow = {
+  restaurant: 'rest1'|'rest2';
+  id: string;
+  name: string;
+  price: number;
+  category: 'food'|'beverage'|'dessert';
+  available_start: string; // HH:MM:SS
+  available_end: string;   // HH:MM:SS
+  stock_current: number;
+  stock_minimum: number;
+  is_active: boolean;
+  cross_sell_items: string[]; // array de ids
 };
 
-/* =======================
-   Acceso a datos (Supabase)
-   Tablas esperadas:
-   - tickets(id text pk, guest_id, room, type, area, status, priority, items jsonb, notes, created_at, updated_at)
-   - ticket_history(id bigserial, request_id fk, status, actor, note, ts)
-   ======================= */
+async function dbMenuUnion(): Promise<MenuRow[]> {
+  const { data, error } = await supabase.from('menu_union').select('*');
+  if (error) throw error;
+  return (data ?? []) as any;
+}
+
 
 async function dbCreateTicket(t: {
   id: string;
