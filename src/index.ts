@@ -64,27 +64,21 @@ interface AgentInput {
 }
 
 interface AgentConfig {
-  // overrides opcionales desde config/env
   accessWindowStart?: string;
   accessWindowEnd?: string;
-  api_key?: string; // compat template
-  default_count?: number; // compat template
+  //enable_stock_check?: boolean;
+  enable_cross_sell?: boolean;
+  cross_sell_threshold?: number;
+  api_key?: string;       // compat
+  default_count?: number; // compat
 }
 
-/* =======================
-   Supabase Client
-   ======================= */
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
+// ============ Supabase ============
+const supabase = createClient(
+  process.env.SUPABASE_URL ?? '',
+  process.env.SUPABASE_SERVICE_ROLE ?? ''
+);
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
-  // eslint-disable-next-line no-console
-  console.warn(
-    '⚠️  Falta SUPABASE_URL o SUPABASE_SERVICE_ROLE en .env — el servidor arrancará, pero las operaciones DB fallarán.'
-  );
-}
-
-const supabase = createClient(SUPABASE_URL ?? '', SUPABASE_SERVICE_ROLE ?? '');
 
 /* =======================
    Utilidades de dominio
