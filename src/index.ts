@@ -149,82 +149,29 @@ async function dbMenuUnion(): Promise<MenuRow[]> {
   return (data ?? []) as any;
 }
 
-
-async function dbCreateTicket(t: {
-  id: string;
-  guest_id: string;
-  room: string;
-  type: string;
-  area: string;
-  items?: any;
-  notes?: string;
-  priority?: string;
-  status: TicketStatus;
-}) {
-  const { error } = await supabase.from('tickets').insert({
-    id: t.id,
-    guest_id: t.guest_id,
-    room: t.room,
-    type: t.type,
-    area: t.area,
-    items: t.items ?? null,
-    notes: t.notes ?? null,
-    priority: t.priority ?? 'normal',
-    status: t.status,
-    created_at: nowISO(),
-    updated_at: nowISO(),
-  });
+// Room Service (RB)
+async function rbCreateTicket(row: {
+  id: string; guest_id: string; room: string; restaurant: 'rest1'|'rest2';
+  status: TicketStatus; priority: string; items: any; total_amount: number; notes?: string;
+}){
+  const { error } = await supabase.from('tickets_rb').insert(row);
+  if (error) throw error;
+}
+async function rbUpdateTicket(id: string, patch: Partial<{status: TicketStatus; priority:string; notes:string}>){
+  const { error } = await supabase.from('tickets_rb')
+    .update({ ...patch, updated_at: nowISO() }).eq('id', id);
+  if (error) throw error;
+}
+async function rbGetTicket(id: string){
+  const { data, error } = await supabase.from('tickets_rb').select('*').eq('id', id).maybeSingle();
+  if (error) throw error;
+  return data as any | null;
+}
+async function rbAddHistory(h: {request_id: string; status: string; actor: string; note?: string}){
+  const { error } = await supabase.from('ticket_history_rb').insert({ ...h, ts: nowISO() });
   if (error) throw error;
 }
 
-async function dbUpdateTicket(
-  id: string,
-  patch: Partial<{ status: TicketStatus; area: string; notes: string }>
-) {
-  const { error } = await supabase
-    .from('tickets')
-    .update({ ...patch, updated_at: nowISO() })
-    .eq('id', id);
-  if (error) throw error;
-}
-
-async function dbGetTicket(id: string) {
-  const { data, error } = await supabase
-    .from('tickets')
-    .select('*')
-    .eq('id', id)
-    .maybeSingle();
-  if (error) throw error;
-  return data as
-    | {
-        id: string;
-        guest_id: string;
-        room: string;
-        type: 'food' | 'beverage' | 'maintenance';
-        area: string;
-        status: TicketStatus;
-        items?: any;
-        notes?: string;
-        priority?: string;
-      }
-    | null;
-}
-
-async function dbAddHistory(rec: {
-  request_id: string;
-  status: TicketStatus | string;
-  actor: string;
-  note?: string;
-}) {
-  const { error } = await supabase.from('ticket_history').insert({
-    request_id: rec.request_id,
-    status: rec.status,
-    actor: rec.actor,
-    note: rec.note ?? null,
-    ts: nowISO(),
-  });
-  if (error) throw error;
-}
 
 // Cross-sell: toma ids desde cross_sell_items del menú base de cada item elegido
 function pickCrossSellFromUnion(menu: MenuRow[], chosen: Array<{id?:string; name:string; restaurant?:'rest1'|'rest2'}>, prefer: 'rest1'|'rest2'){
