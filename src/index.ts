@@ -226,6 +226,55 @@ async function dbAddHistory(rec: {
   if (error) throw error;
 }
 
+// Cross-sell: toma ids desde cross_sell_items del menú base de cada item elegido
+function pickCrossSellFromUnion(menu: MenuRow[], chosen: Array<{id?:string; name:string; restaurant?:'rest1'|'rest2'}>, prefer: 'rest1'|'rest2'){
+  const chosenIds = new Set(
+    chosen.map(c => c.id).filter(Boolean) as string[]
+  );
+
+  // Construye mapa id->MenuRow
+  const byId = new Map(menu.map(m => [m.id, m]));
+  // Junta todas las sugerencias
+  const sugs = new Set<string>();
+  for (const c of chosen){
+    if (c.id && byId.has(c.id)){
+      const row = byId.get(c.id)!;
+      (row.cross_sell_items ?? []).forEach(id => sugs.add(id));
+    } else {
+      // por nombre (fallback)
+      const row = menu.find(m => m.name.toLowerCase() === c.name.toLowerCase());
+      row?.cross_sell_items?.forEach(id => sugs.add(id));
+    }
+  }
+  // Quita los ya elegidos
+  chosenIds.forEach(id => sugs.delete(id));
+
+  // Convierte a filas disponibles por horario/stock
+  const cur = hhmm();
+  const asRows = [...sugs].map(id => byId.get(id)).filter(Boolean) as MenuRow[];
+  const available = asRows.filter(r =>
+    r.is_active &&
+    r.stock_current > r.stock_minimum &&
+    isInRange(cur, (r.available_start as any).toString().slice(0,5), (r.available_end as any).toString().slice(0,5))
+  );
+
+  // Prioriza el mismo restaurante y luego el otro
+  available.sort((a,b)=>{
+    if (a.restaurant === prefer && b.restaurant !== prefer) return -1;
+    if (a.restaurant !== prefer && b.restaurant === prefer) return 1;
+    return 0;
+  });
+
+  // Regresa top 3
+  return available.slice(0,3).map(r => ({
+    restaurant: r.restaurant,
+    id: r.id,
+    name: r.name,
+    price: r.price,
+    category: r.category
+  }));
+}
+
 /* =======================
    Implementación del Tool
    ======================= */
