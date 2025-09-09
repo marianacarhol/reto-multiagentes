@@ -196,6 +196,25 @@ async function mAddHistory(h: {request_id: string; status: string; actor: string
   if (error) throw error;
 }
 
+// Feedback
+async function addFeedback(rec: {
+  domain: 'rb'|'m';
+  guest_id: string;
+  request_id: string;
+  message?: string;
+  rating?: number;
+}){
+  const { error } = await supabase.from('feedback').insert({
+    domain: rec.domain,
+    guest_id: rec.guest_id,
+    request_id: rec.request_id,
+    message: rec.message ?? null,
+    rating: rec.rating ?? null,
+    created_at: nowISO(),
+  });
+  if (error) throw error;
+}
+
 // Cross-sell: toma ids desde cross_sell_items del menú base de cada item elegido
 function pickCrossSellFromUnion(menu: MenuRow[], chosen: Array<{id?:string; name:string; restaurant?:'rest1'|'rest2'}>, prefer: 'rest1'|'rest2'){
   const chosenIds = new Set(
