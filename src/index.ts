@@ -1,13 +1,8 @@
 /**
- * Agent-03 RoomService & Maintenance Tool (Supabase-backed)
+ * Agent-03 RoomService & Maintenance Tool (Multi-Restaurant, Split Tables)
+ * v2.1.0
  *
- * Orquesta pedidos de A&B y tickets de mantenimiento:
- * - Clasificación (food | beverage | maintenance)
- * - Políticas (ventana de acceso, DND, límite de gasto)
- * - Despacho/estado e historial (persistente en Supabase)
- *
- * @fileoverview Main tool implementation for agent-03-roomservice-maintenance
- * @since 1.0.0
+ * - Menús separados por restaurante (rest1/rest2) + vista menu_union
  */
 
 import 'dotenv/config';
@@ -26,30 +21,46 @@ import { createClient } from '@supabase/supabase-js';
 type TicketStatus = 'CREADO' | 'ACEPTADA' | 'EN_PROCESO' | 'COMPLETADA';
 
 interface AgentInput {
-  action?: 'create' | 'assign' | 'status' | 'complete' | 'feedback';
+  action?: 'get_menu' | 'create' | 'status' | 'complete' | 'assign' | 'feedback' | 'confirm_service';
+
+  // Identidad básica
   guest_id: string;
   room: string;
-  text?: string;
-  type?: 'food' | 'beverage' | 'maintenance';
-  items?: Array<{ name: string; qty?: number; price?: number }>;
-  notes?: string;
-  priority?: 'low' | 'normal' | 'high';
 
-  now?: string; // ISO datetime
+  // Room Service
+  restaurant?: 'rest1' | 'rest2'; // requerido si type=food|beverage
+  type?: ServiceType;
+  items?: Array<{ id?: string; name: string; qty?: number; price?: number; restaurant?: 'rest1'|'rest2' }>;
+
+  // Mantenimiento
+  issue?: string;
+  severity?: 'low'|'medium'|'high';
+
+  // Comunes
+  text?: string;
+  notes?: string;
+  priority?: 'low'|'normal'|'high';
+
+  now?: string;
   do_not_disturb?: boolean;
   guest_profile?: {
     tier?: 'standard' | 'gold' | 'platinum';
     daily_spend?: number;
     spend_limit?: number;
+    preferences?: string[];
   };
-  access_window?: { start: string; end: string }; // HH:MM:SS
+  access_window?: { start: string; end: string };
 
-  // mantenimiento
-  issue?: string;
-  severity?: 'low' | 'medium' | 'high';
-
-  // requerido para acciones != create
+  // Transiciones
   request_id?: string;
+
+  // Confirmación/Feedback
+  service_rating?: number;      // 1-5
+  service_feedback?: string;
+  service_completed_by?: string;
+
+  // Filtros get_menu
+  menu_category?: 'food'|'beverage'|'dessert';
 }
 
 interface AgentConfig {
