@@ -12,7 +12,7 @@ interface ChatContext {
   messages: ChatMessage[];
   lastRequestId?: string;
 }
-
+ 
 // Definir tipos para los códigos de error
 type ErrorCode = 'ACCESS_WINDOW_BLOCK' | 'SPEND_LIMIT' | 'ITEMS_UNAVAILABLE' | 'NOT_FOUND' | 'MISSING_ISSUE' | 'VALIDATION_ERROR';
 
@@ -43,8 +43,8 @@ export class SimpleChatbotWrapper {
       // 3. Analizar mensaje y convertir a input del agente
       const agentInput = this.messageToAgentInput(message, context);
       
-      // 4. Llamar a tu herramienta existente 
-      const result = await (tool as any).execute(agentInput, {
+      // 4. Llamar a tu herramienta existente (corregido: usar call en lugar de execute)
+      const result = await tool.execute( agentInput, {
         enable_stock_check: true,
         enable_cross_sell: true,
         accessWindowStart: '06:00',
@@ -71,11 +71,7 @@ export class SimpleChatbotWrapper {
       return { response, context };
       
     } catch (error) {
-      console.error('Error en processMessage:', error);
-      console.error('Stack:', error instanceof Error ? error.stack : 'No stack available');
-      console.error('Input data:', { message, guestId, room });
-      
-      const errorResponse = `❌ Error específico: ${error instanceof Error ? error.message : String(error)}`;
+      const errorResponse = '❌ Lo siento, ha ocurrido un error. ¿Podrías intentar de nuevo?';
       
       context.messages.push({
         role: 'assistant',
