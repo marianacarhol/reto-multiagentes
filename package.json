@@ -44,10 +44,16 @@
   "dependencies": {
     "@ai-spine/tools": "^1.0.0",
     "@supabase/supabase-js": "^2.57.2",
-    "dotenv": "^17.2.2"
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
+    "openai": "^5.20.0",
+    "socket.io": "^4.8.1"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
     "@types/eslint": "^8.44.8",
+    "@types/express": "^5.0.3",
     "@types/jest": "^29.5.8",
     "@types/node": "^20.10.0",
     "@types/supertest": "^2.0.16",

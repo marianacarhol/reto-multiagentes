@@ -37,7 +37,7 @@ catch (error) {
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
-    console.warn('⚠️  Falta configuración de Supabase en .env');
+    console.warn('⚠️  Falta configuración de Supabase en .env');
 }
 const supabase = createClient(SUPABASE_URL ?? '', SUPABASE_SERVICE_ROLE ?? '');
 /* =======================
@@ -343,27 +343,16 @@ const tool = (0, tools_1.createTool)({
             action: {
                 type: 'string',
                 enum: ['create', 'assign', 'status', 'complete', 'feedback', 'get_menu', 'confirm_service'],
-                required: false,
                 default: 'create',
-            },
-            guest_id: {
-                type: 'string',
-                required: true,
-                minLength: 1,
-            },
-            room: {
-                type: 'string',
-                required: true,
-                minLength: 1,
-            },
-            text: {
-                type: 'string',
                 required: false,
             },
+            guest_id: (0, tools_1.stringField)({ required: true }),
+            room: (0, tools_1.stringField)({ required: true }),
+            text: (0, tools_1.stringField)({ required: false }),
             type: {
                 type: 'string',
+                required: false,
                 enum: ['food', 'beverage', 'maintenance'],
-                required: false
             },
             items: {
                 type: 'array',
@@ -390,7 +379,6 @@ const tool = (0, tools_1.createTool)({
                             required: false,
                         },
                     },
-                    // required: ['name'], // Removed: not supported in this schema definition
                 },
             },
             notes: {
@@ -468,8 +456,6 @@ const tool = (0, tools_1.createTool)({
             service_rating: {
                 type: 'number',
                 required: false,
-                // minimum: 1, // Removed unsupported property
-                // maximum: 5, // You may need to enforce this in validation logic instead
             },
             service_feedback: {
                 type: 'string',
@@ -513,28 +499,20 @@ const tool = (0, tools_1.createTool)({
                 required: false,
                 default: 1,
             },
-        },
+        }
     },
     async execute(input, config) {
-        // DEBUG: Ver qué está llegando
-        console.log('🔍 INPUT RECEIVED:', JSON.stringify(input, null, 2));
-        console.log('🔍 guest_id type:', typeof input.guest_id);
-        console.log('🔍 guest_id value:', input.guest_id);
         const { action = 'create', guest_id, room } = input;
-        // Arreglo temporal del guest_id
-        const actualGuestId = typeof guest_id === 'object' ? 'G001' : guest_id;
-        const actualRoom = typeof room === 'object' ? '101' : room;
-        if (!actualGuestId || !actualRoom) {
+        if (typeof guest_id !== 'string' || !guest_id || typeof room !== 'string' || !room) {
             return {
                 status: 'error',
                 error: {
                     code: 'VALIDATION_ERROR',
-                    message: `guest_id (${typeof guest_id}) y room (${typeof room}) son requeridos`,
+                    message: 'guest_id y room son requeridos y deben ser cadenas de texto no vacías',
                     type: 'validation_error'
                 },
             };
         }
-        // Continúa con el resto de la lógica usando actualGuestId y actualRoom
         try {
             // --- GET MENU ---
             if (action === 'get_menu') {
@@ -868,14 +846,14 @@ async function main() {
         });
         console.log('🚀 Agent-03 Enhanced Room Service & Maintenance Tool started');
         console.log('📋 Nuevas funcionalidades:');
-        console.log('   ✅ Menús dinámicos por horario y stock');
-        console.log('   ✅ Cross-sell inteligente basado en preferencias');
-        console.log('   ✅ Confirmación de servicios con rating');
-        console.log('   ✅ Escalamiento automático por feedback negativo');
-        console.log('   ✅ Gestión avanzada de stock');
-        console.log(`🔗 Health:  http://localhost:${process.env.PORT || 3000}/health`);
+        console.log('   ✅ Menús dinámicos por horario y stock');
+        console.log('   ✅ Cross-sell inteligente basado en preferencias');
+        console.log('   ✅ Confirmación de servicios con rating');
+        console.log('   ✅ Escalamiento automático por feedback negativo');
+        console.log('   ✅ Gestión avanzada de stock');
+        console.log(`🔗 Health:  http://localhost:${process.env.PORT || 3000}/health`);
         console.log(`🔗 Execute: http://localhost:${process.env.PORT || 3000}/api/execute`);
-        console.log(`🔗 Menu:    http://localhost:${process.env.PORT || 3000}/api/execute (action: get_menu)`);
+        console.log(`🔗 Menu:    http://localhost:${process.env.PORT || 3000}/api/execute (action: get_menu)`);
     }
     catch (error) {
         console.error('Failed to start enhanced tool server:', error);

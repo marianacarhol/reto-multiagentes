@@ -18,7 +18,21 @@ import {
   stringField,
   type ToolExecutionResult,
 } from '@ai-spine/tools';
+import express from "express";
+import { chatbot } from "./chatbot";
 
+const app = express();
+app.use(express.json());
+
+app.post("/chat", async (req, res) => {
+  const { message } = req.body;
+  const response = await chatbot(message);
+  res.json({ response });
+});
+
+app.listen(process.env.PORT || 3000, () => {
+  console.log("🚀 Servidor corriendo en puerto", process.env.PORT || 3000);
+});
 
 
 // Importación dinámica de Supabase
