@@ -460,6 +460,25 @@ const tool = createTool<AgentInput, AgentConfig>({
 
         const id = `REQ-${Date.now()}`;
 
+
+          // Stock por horario 
+          if (config.enable_stock_check && items.length) {
+            const menu = await dbMenuUnion();
+            const cur = hhmm(input.now);
+            for (const it of items) {
+              // localizar por id o por nombre
+              const row = it.id ? menu.find(m => m.id === it.id)
+                                : menu.find(m => m.name.toLowerCase() === it.name.toLowerCase());
+              if (!row) continue;
+              const ok = row.is_active &&
+                         row.stock_current > row.stock_minimum &&
+                         isInRange(cur, row.available_start.toString().slice(0,5), row.available_end.toString().slice(0,5));
+              if (!ok) {
+                return { status: 'error', error: { code: 'ITEMS_UNAVAILABLE', message: `No disponible: ${row.name}` } };
+              }
+            }
+          }
+
         // CREADO
         await dbCreateTicket({
           id,
