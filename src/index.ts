@@ -306,6 +306,112 @@ function pickCrossSellFromUnion(menu: MenuRow[], chosen: Array<{id?:string; name
   }));
 }
 
+function pickRandom<T>(arr: T[], count: number): T[] {
+  // shuffle simple + slice
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a.slice(0, count);
+}
+
+function normName(s?: string){
+  return (s ?? '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'') // quita acentos
+    .toLowerCase().trim().replace(/\s+/g,' ');
+}
+
+function pickCrossSellByCategory(
+  menu: MenuRow[],
+  chosen: Array<{id?:string; name:string; restaurant?:'rest1'|'rest2'}>,
+  opts: {
+    nowHHMM: string;
+    perCategoryCount: number;              // cuántos por categoría faltante
+    preferOppositeOf?: 'rest1'|'rest2';    // priorizar del opuesto
+    explicitType?: 'food'|'beverage'|'maintenance'; // fallback
+    forbidSameCategoryIfPresent?: boolean; // NO sugerir cat ya pedida
+  }
+){
+  const chosenIds = new Set(chosen.map(c => c.id).filter(Boolean) as string[]);
+  const chosenNames = new Set(chosen.map(c => normName(c.name)));
+
+  // Mapear items elegidos a filas del menú
+  const byName = new Map(menu.map(m => [normName(m.name), m]));
+  const chosenRows: MenuRow[] = chosen.map(it => {
+    if (it.id) return menu.find(m => m.id === it.id);
+    const nn = normName(it.name);
+    return byName.get(nn);
+  }).filter(Boolean) as MenuRow[];
+
+  // Categorías ya elegidas
+  const chosenCats = new Set<'food'|'beverage'|'dessert'>(
+    chosenRows.map(r => r.category) as any
+  );
+
+  // Fallback SIEMPRE: si el pedido dice type=food|beverage, asegúralo en chosenCats
+  if (opts.explicitType === 'food' || opts.explicitType === 'beverage') {
+    if (!chosenCats.has(opts.explicitType)) {
+      chosenCats.add(opts.explicitType);
+    }
+  }
+
+  // Determinar categorías faltantes
+  const allCats = ['food','beverage','dessert'] as const;
+  const targetCats: Array<'food'|'beverage'|'dessert'> = [];
+
+  for (const cat of allCats) {
+    if (opts.forbidSameCategoryIfPresent && chosenCats.has(cat)) continue; // no sugerir mismas
+    if (!chosenCats.has(cat)) targetCats.push(cat);
+  }
+
+  // Si ya tenían las 3, puedes no sugerir nada (o quitar el if si quieres sugerir igualmente)
+  if (targetCats.length === 0) return [];
+
+  // Pool disponible
+  const available = menu.filter(r =>
+    r.is_active &&
+    r.stock_current > r.stock_minimum &&
+    isInRange(opts.nowHHMM, (r.available_start as any).toString().slice(0,5), (r.available_end as any).toString().slice(0,5)) &&
+    !chosenIds.has(r.id) &&
+    !chosenNames.has(normName(r.name))
+  );
+
+  const byCat = new Map<'food'|'beverage'|'dessert', MenuRow[]>();
+  for (const c of allCats) byCat.set(c, []);
+  for (const r of available) byCat.get(r.category as any)!.push(r);
+
+  // Priorizar restaurante opuesto si se pide
+  if (opts.preferOppositeOf) {
+    for (const cat of allCats) {
+      const arr = byCat.get(cat)!;
+      arr.sort((a,b)=>{
+        if (a.restaurant === opts.preferOppositeOf && b.restaurant !== opts.preferOppositeOf) return -1;
+        if (a.restaurant !== opts.preferOppositeOf && b.restaurant === opts.preferOppositeOf) return 1;
+        return 0;
+      });
+    }
+  }
+
+  // Random por categoría faltante
+  const picks: any[] = [];
+  for (const cat of targetCats) {
+    const pool = byCat.get(cat) ?? [];
+    if (!pool.length) continue;
+    // shuffle rápido
+    for (let i = pool.length-1; i>0; i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+    const count = Math.max(1, Math.min(3, opts.perCategoryCount));
+    for (const r of pool.slice(0, count)) {
+      picks.push({ restaurant: r.restaurant, id: r.id, name: r.name, price: r.price, category: r.category });
+    }
+  }
+
+  return picks;
+}
+
 // ============ Tool ============
 const tool = createTool<AgentInput, AgentConfig>({
   metadata: {
@@ -375,6 +481,9 @@ const tool = createTool<AgentInput, AgentConfig>({
       enable_stock_check: booleanField({ required: false, default: true }),
       enable_cross_sell:  booleanField({ required: false, default: true }),
       cross_sell_threshold: numberField({ required: false, default: 1 }),
+      cross_sell_per_category: booleanField({ required: false, default: true }),
+      cross_sell_per_category_count: numberField({ required: false, default: 1, min: 1, max: 3 }),
+      cross_sell_prefer_opposite: booleanField({ required: false, default: true }),
       api_key: stringField({ required: false }),
       default_count: numberField({ required: false, default: 1 }),
     },
@@ -419,6 +528,10 @@ const tool = createTool<AgentInput, AgentConfig>({
 
       // ---- CREATE
       if (action === 'create') {
+        // Determinar dominio/área
+        const type = classify(input.text, input.items, input.type);
+        const area = mapArea(type);
+
         if (type === 'food' || type === 'beverage') {
           if (!input.restaurant) {
             return { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'restaurant es requerido para Room Service' } };
@@ -436,6 +549,7 @@ const tool = createTool<AgentInput, AgentConfig>({
           }
 
           const items = input.items ?? [];
+
           // Límite de gasto
           let spendLimit = input.guest_profile?.spend_limit;
           if (spendLimit == null) {
@@ -449,28 +563,30 @@ const tool = createTool<AgentInput, AgentConfig>({
           }
 
           // Stock/horario (opcional)
+          const menu = await dbMenuUnion();
           if (config.enable_stock_check && items.length) {
-            const menu = await dbMenuUnion();
             const cur = hhmm(input.now);
             for (const it of items) {
-              const row = it.id ? menu.find(m => m.id === it.id)
-                                : menu.find(m => m.name.toLowerCase() === it.name.toLowerCase());
+              const row = it.id
+                ? menu.find(m => m.id === it.id)
+                : menu.find(m => normName(m.name) === normName(it.name));
               if (!row) continue;
               const ok = row.is_active &&
-                         row.stock_current > row.stock_minimum &&
-                         isInRange(cur, row.available_start.toString().slice(0,5), row.available_end.toString().slice(0,5));
+                        row.stock_current > row.stock_minimum &&
+                        isInRange(cur, row.available_start.toString().slice(0,5), row.available_end.toString().slice(0,5));
               if (!ok) {
-                return { status: 'error', error: { code: 'ITEMS_UNAVAILABLE', message: `No disponible: ${row.name}` } };
+                return { status: 'error', error: { code: 'ITEMS_UNAVAILABLE', message: `No disponible: ${row?.name ?? it.name}` } };
               }
             }
           }
 
+          // Crear ticket RB
           const id = `REQ-${Date.now()}`;
           await rbCreateTicket({
             id,
             guest_id,
             room,
-            restaurant: input.restaurant,
+            restaurant: input.restaurant, // ancla; los ítems pueden venir de ambos
             status: 'CREADO',
             priority: input.priority ?? 'normal',
             items: items,
@@ -481,19 +597,26 @@ const tool = createTool<AgentInput, AgentConfig>({
           await rbUpdateTicket(id, { status: 'ACEPTADA' });
           await rbAddHistory({ request_id: id, status: 'ACEPTADA', actor: input.restaurant });
 
-          // Descontar stock
+          // Descontar stock y registrar consumo
           await decrementStock(items);
-
-          // Registrar consumo (opcional; ignora si la tabla no existe)
           if (total > 0) {
             await addDailySpend(guest_id, total);
           }
 
-          // Cross-sell
+          // Cross-sell: aleatorio por categorías faltantes (sin repetir la categoría ya pedida)
           let cross: any[] = [];
           if (config.enable_cross_sell && items.length >= (config.cross_sell_threshold ?? 1)) {
-            const menu = await dbMenuUnion();
-            cross = pickCrossSellFromUnion(menu, items, input.restaurant);
+            const preferOpposite = config.cross_sell_prefer_opposite
+              ? (input.restaurant === 'rest1' ? 'rest2' : 'rest1')
+              : undefined;
+
+            cross = pickCrossSellByCategory(menu, items, {
+              nowHHMM: hhmm(input.now),
+              perCategoryCount: Math.max(1, Math.min(3, config.cross_sell_per_category_count ?? 1)),
+              preferOppositeOf: preferOpposite as any,
+              explicitType: input.type,
+              forbidSameCategoryIfPresent: true
+            });
           }
 
           return {
@@ -510,14 +633,13 @@ const tool = createTool<AgentInput, AgentConfig>({
           };
         }
 
-        // maintenance
+        // --- maintenance (cuando type === 'maintenance')
         if (!input.issue) {
           return { status: 'error', error: { code: 'MISSING_ISSUE', message: 'Describe el issue de mantenimiento' } };
         }
 
         // prioridad simple: severity high => high
-        const computedPriority =
-          (input.severity === 'high') ? 'high' : (input.priority ?? 'normal');
+        const computedPriority = (input.severity === 'high') ? 'high' : (input.priority ?? 'normal');
 
         const id = `REQ-${Date.now()}`;
         await mCreateTicket({
@@ -535,58 +657,6 @@ const tool = createTool<AgentInput, AgentConfig>({
         await mAddHistory({ request_id: id, status: 'ACEPTADA', actor: 'maintenance' });
 
         return { status: 'success', data: { request_id: id, domain: 'm', type, area, status: 'ACEPTADA' } };
-      }
-
-      // ---- Acciones posteriores (status/complete/assign/feedback/confirm)
-      if (!input.request_id) {
-        return { status: 'error', error: { code: 'MISSING_REQUEST_ID', message: 'request_id es requerido' } };
-      }
-
-      // intenta RB
-      const rb = await rbGetTicket(input.request_id);
-      if (rb) {
-        if (action === 'status') {
-          await rbUpdateTicket(input.request_id, { status: 'EN_PROCESO' });
-          await rbAddHistory({ request_id: input.request_id, status: 'EN_PROCESO', actor: rb.restaurant });
-          return { status: 'success', data: { request_id: input.request_id, domain: 'rb', status: 'EN_PROCESO' } };
-        }
-        if (action === 'complete') {
-          await rbUpdateTicket(input.request_id, { status: 'COMPLETADA' });
-          await rbAddHistory({ request_id: input.request_id, status: 'COMPLETADA', actor: rb.restaurant });
-          return { status: 'success', data: { request_id: input.request_id, domain: 'rb', status: 'COMPLETADA' } };
-        }
-        if (action === 'assign') {
-          await rbAddHistory({ request_id: input.request_id, status: rb.status, actor: rb.restaurant, note: 'Reasignado (demo)' });
-          return { status: 'success', data: { request_id: input.request_id, domain: 'rb', status: rb.status, message: 'Reasignado' } };
-        }
-        if (action === 'feedback' || action === 'confirm_service') {
-          if (action === 'confirm_service') {
-            await rbUpdateTicket(input.request_id, { status: 'COMPLETADA' });
-            await rbAddHistory({
-              request_id: input.request_id,
-              status: 'COMPLETADA',
-              actor: input.service_completed_by || rb.restaurant,
-              note: input.service_feedback ? `Rating: ${input.service_rating ?? ''} - ${input.service_feedback}` : undefined
-            });
-          }
-          if (input.service_rating || input.service_feedback) {
-            await addFeedback({
-              domain: 'rb',
-              guest_id,
-              request_id: input.request_id,
-              message: input.service_feedback,
-              rating: input.service_rating
-            });
-
-            // Escalar prioridad si rating <= 2 y no está completado
-            if ((input.service_rating ?? 5) <= 2 && rb.status !== 'COMPLETADA') {
-              await rbUpdateTicket(input.request_id, { priority: 'high' });
-              await rbAddHistory({ request_id: input.request_id, status: rb.status, actor: 'system', note: 'Escalado por feedback negativo' });
-            }
-          }
-          return { status: 'success', data: { request_id: input.request_id, domain: 'rb', status: action === 'confirm_service' ? 'COMPLETADA' : rb.status, feedbackSaved: !!(input.service_rating || input.service_feedback) } };
-        }
-        return { status: 'error', error: { code: 'UNKNOWN_ACTION', message: 'Acción no soportada para RB' } };
       }
 
       // intenta M
