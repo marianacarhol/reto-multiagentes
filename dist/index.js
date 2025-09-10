@@ -1,17 +1,10 @@
 "use strict";
 /**
- * Agent-03 RoomService & Maintenance Tool (Multi-Restaurant, Split Tables)
- * v2.2.0
- *
- * - Menús separados por restaurante (rest1/rest2) + vista menu_union
- * - Cross-sell entre restaurantes
- * - Tickets separados: tickets_rb / tickets_m + historiales
- * - Feedback usando tu tabla (ticket_id)
- * - Límite de gasto (perfil inline o tabla guests)
- * - Seguimiento de estado
- * - Descuento de stock al crear RB
- * - Prioridad simple (severity 'high' y feedback <= 2)
- * - Registro de consumo en spend_ledger (opcional; ignora si no existe)
+ * Agent-03 RoomService & Maintenance Tool (Multi-Restaurant)
+ * v2.3.1
+ * - Menú dinámico por restaurante (rest1/rest2) con horarios
+ * - Ítems de entrada: sólo name (+qty opcional); precio/stock/horario/restaurant desde BD
+ * - Tickets RB/M, feedback y cross-sell
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 require("dotenv/config");
@@ -26,7 +19,7 @@ const hhmm = (nowStr) => {
     return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 };
 const isInRange = (cur, start, end) => {
-    // soporta rangos cruzando medianoche
+    // soporta rangos que cruzan medianoche
     return start <= end ? (cur >= start && cur <= end) : (cur >= start || cur <= end);
 };
 const classify = (text, items, explicit) => {
@@ -49,7 +42,6 @@ const withinWindow = (nowStr, window, cfg, dnd) => {
         return true;
     return isInRange(hhmm(nowStr), start, end);
 };
-const sumItems = (items) => (items ?? []).reduce((a, i) => a + (i.price ?? 0) * (i.qty ?? 1), 0);
 // ============ DB helpers ============
 // guests (opcional para gastar)
 async function dbGetGuestSpendLimit(guest_id) {
@@ -66,6 +58,49 @@ async function dbMenuUnion() {
     if (error)
         throw error;
     return (data ?? []);
+}
+// ------- Resolver de ítems desde BD (precio/horario/stock/restaurante) -------
+function toHHMM(s) {
+    return s.toString().slice(0, 5);
+}
+function normName(s) {
+    return (s ?? '')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase().trim().replace(/\s+/g, ' ');
+}
+async function resolveAndValidateItems(rawItems, nowStr, enableStockCheck = true) {
+    const menu = await dbMenuUnion();
+    const cur = hhmm(nowStr);
+    const byId = new Map(menu.map(m => [m.id, m]));
+    const byName = new Map(menu.map(m => [normName(m.name), m]));
+    const resolved = [];
+    for (const it of (rawItems ?? [])) {
+        const row = it.id ? byId.get(it.id) : byName.get(normName(it.name));
+        if (!row) {
+            throw new Error(`No encontrado en menú: ${it.name}`);
+        }
+        const active = row.is_active === true;
+        const inTime = isInRange(cur, toHHMM(row.available_start), toHHMM(row.available_end));
+        const stockOK = !enableStockCheck || (row.stock_current > row.stock_minimum);
+        if (!active)
+            throw new Error(`Inactivo: ${row.name}`);
+        if (!inTime)
+            throw new Error(`Fuera de horario: ${row.name}`);
+        if (!stockOK)
+            throw new Error(`Sin stock suficiente: ${row.name}`);
+        const qty = Math.max(1, it.qty ?? 1);
+        resolved.push({
+            id: row.id,
+            name: row.name,
+            qty,
+            price: Number(row.price),
+            restaurant: row.restaurant,
+            category: row.category,
+        });
+    }
+    const total = resolved.reduce((acc, r) => acc + r.price * r.qty, 0);
+    const restSet = new Set(resolved.map(r => r.restaurant));
+    return { items: resolved, total, restSet };
 }
 // Room Service (RB)
 async function rbCreateTicket(row) {
@@ -113,11 +148,12 @@ async function mAddHistory(h) {
     if (error)
         throw error;
 }
-// Feedback (Opción B: usa tu tabla tal cual con ticket_id)
+// Feedback (usa tu tabla con request_id)
 async function addFeedback(rec) {
     const { error } = await supabase.from('feedback').insert({
+        domain: rec.domain,
         guest_id: rec.guest_id,
-        ticket_id: rec.request_id, // <-- tu columna
+        request_id: rec.request_id,
         message: rec.message ?? null,
         rating: rec.rating ?? null,
         created_at: nowISO(),
@@ -163,48 +199,83 @@ async function addDailySpend(guest_id, amount) {
         console.warn('spend_ledger insert skipped:', e?.message || e);
     }
 }
-// Cross-sell desde menu_union
-function pickCrossSellFromUnion(menu, chosen, prefer) {
+// Helpers de cross-sell
+function pickCrossSellByCategory(menu, chosen, opts) {
     const chosenIds = new Set(chosen.map(c => c.id).filter(Boolean));
-    const byId = new Map(menu.map(m => [m.id, m]));
-    const sugs = new Set();
-    for (const c of chosen) {
-        if (c.id && byId.has(c.id)) {
-            const row = byId.get(c.id);
-            (row.cross_sell_items ?? []).forEach(id => sugs.add(id));
-        }
-        else {
-            const row = menu.find(m => m.name.toLowerCase() === c.name.toLowerCase());
-            row?.cross_sell_items?.forEach(id => sugs.add(id));
+    const chosenNames = new Set(chosen.map(c => normName(c.name)));
+    // Mapear items elegidos a filas del menú
+    const byName = new Map(menu.map(m => [normName(m.name), m]));
+    const chosenRows = chosen.map(it => {
+        if (it.id)
+            return menu.find(m => m.id === it.id);
+        const nn = normName(it.name);
+        return byName.get(nn);
+    }).filter(Boolean);
+    // Categorías ya elegidas
+    const chosenCats = new Set(chosenRows.map(r => r.category));
+    if (opts.explicitType === 'food' || opts.explicitType === 'beverage') {
+        if (!chosenCats.has(opts.explicitType)) {
+            chosenCats.add(opts.explicitType);
         }
     }
-    chosenIds.forEach(id => sugs.delete(id));
-    const cur = hhmm();
-    const asRows = [...sugs].map(id => byId.get(id)).filter(Boolean);
-    const available = asRows.filter(r => r.is_active &&
+    // Determinar categorías faltantes
+    const allCats = ['food', 'beverage', 'dessert'];
+    const targetCats = [];
+    for (const cat of allCats) {
+        if (opts.forbidSameCategoryIfPresent && chosenCats.has(cat))
+            continue;
+        if (!chosenCats.has(cat))
+            targetCats.push(cat);
+    }
+    if (targetCats.length === 0)
+        return [];
+    // Pool disponible
+    const available = menu.filter(r => r.is_active &&
         r.stock_current > r.stock_minimum &&
-        isInRange(cur, r.available_start.toString().slice(0, 5), r.available_end.toString().slice(0, 5)));
-    available.sort((a, b) => {
-        if (a.restaurant === prefer && b.restaurant !== prefer)
-            return -1;
-        if (a.restaurant !== prefer && b.restaurant === prefer)
-            return 1;
-        return 0;
-    });
-    return available.slice(0, 3).map(r => ({
-        restaurant: r.restaurant,
-        id: r.id,
-        name: r.name,
-        price: r.price,
-        category: r.category
-    }));
+        isInRange(opts.nowHHMM, r.available_start.toString().slice(0, 5), r.available_end.toString().slice(0, 5)) &&
+        !chosenIds.has(r.id) &&
+        !chosenNames.has(normName(r.name)));
+    const byCat = new Map();
+    for (const c of allCats)
+        byCat.set(c, []);
+    for (const r of available)
+        byCat.get(r.category).push(r);
+    // Priorizar restaurante opuesto si se pide (y solo cuando el ticket no es multi)
+    if (opts.preferOppositeOf) {
+        for (const cat of allCats) {
+            const arr = byCat.get(cat);
+            arr.sort((a, b) => {
+                if (a.restaurant === opts.preferOppositeOf && b.restaurant !== opts.preferOppositeOf)
+                    return -1;
+                if (a.restaurant !== opts.preferOppositeOf && b.restaurant === opts.preferOppositeOf)
+                    return 1;
+                return 0;
+            });
+        }
+    }
+    // Random simple por categoría faltante (shuffle + slice)
+    const picks = [];
+    for (const cat of targetCats) {
+        const pool = byCat.get(cat) ?? [];
+        if (!pool.length)
+            continue;
+        for (let i = pool.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [pool[i], pool[j]] = [pool[j], pool[i]];
+        }
+        const count = Math.max(1, Math.min(3, opts.perCategoryCount));
+        for (const r of pool.slice(0, count)) {
+            picks.push({ restaurant: r.restaurant, id: r.id, name: r.name, price: r.price, category: r.category });
+        }
+    }
+    return picks;
 }
 // ============ Tool ============
 const tool = (0, tools_1.createTool)({
     metadata: {
         name: 'agent-03-roomservice-maintenance-split',
-        version: '2.2.0',
-        description: 'Room Service (rest1/rest2) + Maintenance con tablas separadas y cross-sell inter-restaurantes',
+        version: '2.3.1',
+        description: 'Room Service (rest1/rest2) + Maintenance con tablas separadas y cross-sell inter-restaurantes (multi-enabled)',
         capabilities: ['dynamic-menu', 'intelligent-cross-sell', 'ticket-tracking', 'feedback', 'policy-check'],
         author: 'Equipo A3',
         license: 'MIT',
@@ -214,16 +285,14 @@ const tool = (0, tools_1.createTool)({
             action: { type: 'string', enum: ['get_menu', 'create', 'status', 'complete', 'assign', 'feedback', 'confirm_service'], required: false, default: 'create' },
             guest_id: (0, tools_1.stringField)({ required: true }),
             room: (0, tools_1.stringField)({ required: true }),
-            restaurant: { type: 'string', required: false, enum: ['rest1', 'rest2'] },
+            restaurant: { type: 'string', required: false, enum: ['rest1', 'rest2', 'multi'] }, // acepta multi
             type: { type: 'string', required: false, enum: ['food', 'beverage', 'maintenance'] },
             items: {
                 type: 'array', required: false, items: {
                     type: 'object', properties: {
-                        id: (0, tools_1.stringField)({ required: false }),
-                        name: (0, tools_1.stringField)({ required: true }),
-                        qty: (0, tools_1.numberField)({ required: false, default: 1, min: 1 }),
-                        price: (0, tools_1.numberField)({ required: false, min: 0 }),
-                        restaurant: { type: 'string', required: false, enum: ['rest1', 'rest2'] },
+                        id: (0, tools_1.stringField)({ required: false }), // opcional
+                        name: (0, tools_1.stringField)({ required: true }), // requerido
+                        qty: (0, tools_1.numberField)({ required: false, default: 1, min: 1 }), // cantidad
                     }
                 }
             },
@@ -260,11 +329,14 @@ const tool = (0, tools_1.createTool)({
             enable_stock_check: (0, tools_1.booleanField)({ required: false, default: true }),
             enable_cross_sell: (0, tools_1.booleanField)({ required: false, default: true }),
             cross_sell_threshold: (0, tools_1.numberField)({ required: false, default: 1 }),
+            cross_sell_per_category: (0, tools_1.booleanField)({ required: false, default: true }),
+            cross_sell_per_category_count: (0, tools_1.numberField)({ required: false, default: 1, min: 1, max: 3 }),
+            cross_sell_prefer_opposite: (0, tools_1.booleanField)({ required: false, default: true }),
             api_key: (0, tools_1.stringField)({ required: false }),
             default_count: (0, tools_1.numberField)({ required: false, default: 1 }),
         },
     },
-    async execute(input, config) {
+    execute: async (input, config) => {
         const { action = 'create', guest_id, room } = input;
         if (!guest_id || !room || typeof guest_id !== 'string' || typeof room !== 'string') {
             return { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'guest_id y room son requeridos (string)' } };
@@ -290,76 +362,89 @@ const tool = (0, tools_1.createTool)({
                     }
                 };
             }
-            // Determine domain by classification (unless explicit)
+            // Determine domain by classification (once)
             const type = classify(input.text, input.items, input.type);
             const area = mapArea(type);
             // ---- CREATE
             if (action === 'create') {
                 if (type === 'food' || type === 'beverage') {
-                    if (!input.restaurant) {
-                        return { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'restaurant es requerido para Room Service' } };
-                    }
-                    // Policies: ventana + límite de gasto (de perfil o guests)
+                    // Policies: ventana + DND
                     const okWindow = withinWindow(input.now, input.access_window, { start: config.accessWindowStart, end: config.accessWindowEnd }, input.do_not_disturb);
                     if (!okWindow) {
                         return { status: 'error', error: { code: 'ACCESS_WINDOW_BLOCK', message: 'Fuera de ventana o DND activo' } };
                     }
-                    const items = input.items ?? [];
-                    // Límite de gasto
+                    // ---- construir items desde BD (precio/horario/stock/restaurante)
+                    const rawItems = input.items ?? [];
+                    if (!input.restaurant && rawItems.length === 0) {
+                        return { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'Provee al menos un ítem' } };
+                    }
+                    let resolved = [];
+                    let total = 0;
+                    let restSet = new Set();
+                    try {
+                        const res = await resolveAndValidateItems(rawItems, input.now, config.enable_stock_check !== false);
+                        resolved = res.items;
+                        total = res.total;
+                        restSet = res.restSet;
+                    }
+                    catch (e) {
+                        return { status: 'error', error: { code: 'ITEMS_UNAVAILABLE', message: String(e?.message || e) } };
+                    }
+                    // ---- límite de gasto usando TOTAL real (de BD)
                     let spendLimit = input.guest_profile?.spend_limit;
                     if (spendLimit == null) {
                         const fromGuest = await dbGetGuestSpendLimit(guest_id);
                         if (typeof fromGuest === 'number')
                             spendLimit = Number(fromGuest);
                     }
-                    const total = sumItems(items);
                     const dailySpend = input.guest_profile?.daily_spend ?? 0;
                     if (spendLimit != null && (dailySpend + total) > spendLimit) {
                         return { status: 'error', error: { code: 'SPEND_LIMIT', message: 'Límite de gasto excedido' } };
                     }
-                    // Stock/horario (opcional)
-                    if (config.enable_stock_check && items.length) {
-                        const menu = await dbMenuUnion();
-                        const cur = hhmm(input.now);
-                        for (const it of items) {
-                            const row = it.id ? menu.find(m => m.id === it.id)
-                                : menu.find(m => m.name.toLowerCase() === it.name.toLowerCase());
-                            if (!row)
-                                continue;
-                            const ok = row.is_active &&
-                                row.stock_current > row.stock_minimum &&
-                                isInRange(cur, row.available_start.toString().slice(0, 5), row.available_end.toString().slice(0, 5));
-                            if (!ok) {
-                                return { status: 'error', error: { code: 'ITEMS_UNAVAILABLE', message: `No disponible: ${row.name}` } };
-                            }
-                        }
-                    }
+                    // ---- etiqueta restaurante del ticket
+                    const anchor = (input.restaurant === 'rest1' || input.restaurant === 'rest2') ? input.restaurant : undefined;
+                    const ticketRestaurant = input.restaurant === 'multi' ? 'multi'
+                        : restSet.size > 1 ? 'multi'
+                            : restSet.size === 1 ? Array.from(restSet)[0]
+                                : anchor ?? 'multi';
+                    // ---- crear ticket con items RESUELTOS (incluye price y restaurant ya validados)
                     const id = `REQ-${Date.now()}`;
                     await rbCreateTicket({
                         id,
                         guest_id,
                         room,
-                        restaurant: input.restaurant,
+                        restaurant: ticketRestaurant, // 'rest1' | 'rest2' | 'multi'
                         status: 'CREADO',
                         priority: input.priority ?? 'normal',
-                        items: items,
+                        items: resolved,
                         total_amount: total,
                         notes: input.notes ?? undefined
                     });
                     await rbAddHistory({ request_id: id, status: 'CREADO', actor: 'system' });
                     await rbUpdateTicket(id, { status: 'ACEPTADA' });
-                    await rbAddHistory({ request_id: id, status: 'ACEPTADA', actor: input.restaurant });
-                    // Descontar stock
-                    await decrementStock(items);
-                    // Registrar consumo (opcional; ignora si la tabla no existe)
-                    if (total > 0) {
-                        await addDailySpend(guest_id, total);
+                    await rbAddHistory({ request_id: id, status: 'ACEPTADA', actor: ticketRestaurant });
+                    // “Ping” a cada restaurante involucrado (para visibilidad operacional)
+                    for (const r of restSet) {
+                        await rbAddHistory({ request_id: id, status: 'ACEPTADA', actor: r });
                     }
-                    // Cross-sell
+                    // ---- descuento de stock + consumo
+                    await decrementStock(resolved.map(r => ({ id: r.id, name: r.name, restaurant: r.restaurant, qty: r.qty })));
+                    if (total > 0)
+                        await addDailySpend(guest_id, total);
+                    // ---- cross-sell (si NO es multi, prioriza opuesto; si es multi, neutral)
                     let cross = [];
-                    if (config.enable_cross_sell && items.length >= (config.cross_sell_threshold ?? 1)) {
+                    if (config.enable_cross_sell && resolved.length >= (config.cross_sell_threshold ?? 1)) {
+                        const preferOpposite = (ticketRestaurant === 'rest1' || ticketRestaurant === 'rest2') && config.cross_sell_prefer_opposite
+                            ? (ticketRestaurant === 'rest1' ? 'rest2' : 'rest1')
+                            : undefined;
                         const menu = await dbMenuUnion();
-                        cross = pickCrossSellFromUnion(menu, items, input.restaurant);
+                        cross = pickCrossSellByCategory(menu, resolved, {
+                            nowHHMM: hhmm(input.now),
+                            perCategoryCount: Math.max(1, Math.min(3, config.cross_sell_per_category_count ?? 1)),
+                            preferOppositeOf: preferOpposite,
+                            explicitType: input.type,
+                            forbidSameCategoryIfPresent: true
+                        });
                     }
                     return {
                         status: 'success',
@@ -374,11 +459,10 @@ const tool = (0, tools_1.createTool)({
                         }
                     };
                 }
-                // maintenance
+                // --- maintenance
                 if (!input.issue) {
                     return { status: 'error', error: { code: 'MISSING_ISSUE', message: 'Describe el issue de mantenimiento' } };
                 }
-                // prioridad simple: severity high => high
                 const computedPriority = (input.severity === 'high') ? 'high' : (input.priority ?? 'normal');
                 const id = `REQ-${Date.now()}`;
                 await mCreateTicket({
@@ -435,7 +519,6 @@ const tool = (0, tools_1.createTool)({
                             message: input.service_feedback,
                             rating: input.service_rating
                         });
-                        // Escalar prioridad si rating <= 2 y no está completado
                         if ((input.service_rating ?? 5) <= 2 && rb.status !== 'COMPLETADA') {
                             await rbUpdateTicket(input.request_id, { priority: 'high' });
                             await rbAddHistory({ request_id: input.request_id, status: rb.status, actor: 'system', note: 'Escalado por feedback negativo' });
@@ -480,7 +563,6 @@ const tool = (0, tools_1.createTool)({
                             message: input.service_feedback,
                             rating: input.service_rating
                         });
-                        // Escalar prioridad si rating <= 2 y no está completado
                         if ((input.service_rating ?? 5) <= 2 && mt.status !== 'COMPLETADA') {
                             await mUpdateTicket(input.request_id, { priority: 'high' });
                             await mAddHistory({ request_id: input.request_id, status: mt.status, actor: 'system', note: 'Escalado por feedback negativo' });

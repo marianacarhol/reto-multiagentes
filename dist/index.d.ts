@@ -1,16 +1,9 @@
 /**
- * Agent-03 RoomService & Maintenance Tool (Multi-Restaurant, Split Tables)
- * v2.2.0
- *
- * - Menús separados por restaurante (rest1/rest2) + vista menu_union
- * - Cross-sell entre restaurantes
- * - Tickets separados: tickets_rb / tickets_m + historiales
- * - Feedback usando tu tabla (ticket_id)
- * - Límite de gasto (perfil inline o tabla guests)
- * - Seguimiento de estado
- * - Descuento de stock al crear RB
- * - Prioridad simple (severity 'high' y feedback <= 2)
- * - Registro de consumo en spend_ledger (opcional; ignora si no existe)
+ * Agent-03 RoomService & Maintenance Tool (Multi-Restaurant)
+ * v2.3.1
+ * - Menú dinámico por restaurante (rest1/rest2) con horarios
+ * - Ítems de entrada: sólo name (+qty opcional); precio/stock/horario/restaurant desde BD
+ * - Tickets RB/M, feedback y cross-sell
  */
 import 'dotenv/config';
 type ServiceType = 'food' | 'beverage' | 'maintenance';
@@ -18,14 +11,12 @@ interface AgentInput {
     action?: 'get_menu' | 'create' | 'status' | 'complete' | 'assign' | 'feedback' | 'confirm_service';
     guest_id: string;
     room: string;
-    restaurant?: 'rest1' | 'rest2';
+    restaurant?: 'rest1' | 'rest2' | 'multi';
     type?: ServiceType;
     items?: Array<{
         id?: string;
         name: string;
         qty?: number;
-        price?: number;
-        restaurant?: 'rest1' | 'rest2';
     }>;
     issue?: string;
     severity?: 'low' | 'medium' | 'high';
@@ -56,6 +47,9 @@ interface AgentConfig {
     enable_stock_check?: boolean;
     enable_cross_sell?: boolean;
     cross_sell_threshold?: number;
+    cross_sell_per_category?: boolean;
+    cross_sell_per_category_count?: number;
+    cross_sell_prefer_opposite?: boolean;
     api_key?: string;
     default_count?: number;
 }
