@@ -208,15 +208,16 @@ async function mAddHistory(h: {request_id: string; status: string; actor: string
 
 // Feedback (Opción B: usa tu tabla tal cual con ticket_id)
 async function addFeedback(rec: {
-  domain: 'rb'|'m'; // informativo
+  domain: 'rb'|'m';
   guest_id: string;
   request_id: string;
   message?: string;
   rating?: number;
 }){
   const { error } = await supabase.from('feedback').insert({
+    domain: rec.domain,          // <-- ahora sí
     guest_id: rec.guest_id,
-    ticket_id: rec.request_id,      // <-- tu columna
+    request_id: rec.request_id,  // <-- usa request_id (no ticket_id)
     message: rec.message ?? null,
     rating: rec.rating ?? null,
     created_at: nowISO(),
