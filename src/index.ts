@@ -1,16 +1,17 @@
 /**
  * Agent-03 RoomService & Maintenance Tool (Multi-Restaurant, Split Tables)
- * v2.2.0
+ * v2.3.0  (multi-enabled)
  *
  * - Menús separados por restaurante (rest1/rest2) + vista menu_union
- * - Cross-sell entre restaurantes
+ * - Cross-sell inter-restaurantes
  * - Tickets separados: tickets_rb / tickets_m + historiales
- * - Feedback usando tu tabla (ticket_id)
+ * - Feedback usando tu tabla (request_id)
  * - Límite de gasto (perfil inline o tabla guests)
  * - Seguimiento de estado
  * - Descuento de stock al crear RB
  * - Prioridad simple (severity 'high' y feedback <= 2)
  * - Registro de consumo en spend_ledger (opcional; ignora si no existe)
+ * - Soporte "multi": ticket con ítems de ambos restaurantes; nunca null
  */
 
 import 'dotenv/config';
@@ -34,7 +35,7 @@ interface AgentInput {
   room: string;
 
   // Room Service
-  restaurant?: 'rest1' | 'rest2'; // requerido si type=food|beverage
+  restaurant?: 'rest1' | 'rest2' | 'multi'; // acepta 'multi'; si se omite se infiere por ítems
   type?: ServiceType;
   items?: Array<{ id?: string; name: string; qty?: number; price?: number; restaurant?: 'rest1'|'rest2' }>;
 
@@ -75,6 +76,12 @@ interface AgentConfig {
   enable_stock_check?: boolean;
   enable_cross_sell?: boolean;
   cross_sell_threshold?: number;
+
+  // opciones de cross-sell por categoría
+  cross_sell_per_category?: boolean;          // compat (no se usa si false)
+  cross_sell_per_category_count?: number;     // 1..3 (default 1)
+  cross_sell_prefer_opposite?: boolean;       // prioriza opuesto SOLO si el ticket no es multi
+
   api_key?: string;       // compat
   default_count?: number; // compat
 }
@@ -94,7 +101,7 @@ const hhmm = (nowStr?: string) => {
 };
 
 const isInRange = (cur: string, start: string, end: string) => {
-  // soporta rangos cruzando medianoche
+  // soporta rangos que cruzan medianoche
   return start <= end ? (cur >= start && cur <= end) : (cur >= start || cur <= end);
 };
 
@@ -151,7 +158,7 @@ type MenuRow = {
   stock_current: number;
   stock_minimum: number;
   is_active: boolean;
-  cross_sell_items: string[]; // array de ids
+  cross_sell_items?: string[]; // opcional
 };
 
 async function dbMenuUnion(): Promise<MenuRow[]> {
@@ -162,7 +169,7 @@ async function dbMenuUnion(): Promise<MenuRow[]> {
 
 // Room Service (RB)
 async function rbCreateTicket(row: {
-  id: string; guest_id: string; room: string; restaurant: 'rest1'|'rest2';
+  id: string; guest_id: string; room: string; restaurant: 'rest1'|'rest2'|'multi';
   status: TicketStatus; priority: string; items: any; total_amount: number; notes?: string;
 }){
   const { error } = await supabase.from('tickets_rb').insert(row);
@@ -206,7 +213,7 @@ async function mAddHistory(h: {request_id: string; status: string; actor: string
   if (error) throw error;
 }
 
-// Feedback (Opción B: usa tu tabla tal cual con ticket_id)
+// Feedback (usa tu tabla con request_id)
 async function addFeedback(rec: {
   domain: 'rb'|'m';
   guest_id: string;
@@ -215,9 +222,9 @@ async function addFeedback(rec: {
   rating?: number;
 }){
   const { error } = await supabase.from('feedback').insert({
-    domain: rec.domain,          // <-- ahora sí
+    domain: rec.domain,
     guest_id: rec.guest_id,
-    request_id: rec.request_id,  // <-- usa request_id (no ticket_id)
+    request_id: rec.request_id,
     message: rec.message ?? null,
     rating: rec.rating ?? null,
     created_at: nowISO(),
@@ -264,61 +271,10 @@ async function addDailySpend(guest_id: string, amount: number){
   }
 }
 
-// Cross-sell desde menu_union
-function pickCrossSellFromUnion(menu: MenuRow[], chosen: Array<{id?:string; name:string; restaurant?:'rest1'|'rest2'}>, prefer: 'rest1'|'rest2'){
-  const chosenIds = new Set(
-    chosen.map(c => c.id).filter(Boolean) as string[]
-  );
-
-  const byId = new Map(menu.map(m => [m.id, m]));
-  const sugs = new Set<string>();
-  for (const c of chosen){
-    if (c.id && byId.has(c.id)){
-      const row = byId.get(c.id)!;
-      (row.cross_sell_items ?? []).forEach(id => sugs.add(id));
-    } else {
-      const row = menu.find(m => m.name.toLowerCase() === c.name.toLowerCase());
-      row?.cross_sell_items?.forEach(id => sugs.add(id));
-    }
-  }
-  chosenIds.forEach(id => sugs.delete(id));
-
-  const cur = hhmm();
-  const asRows = [...sugs].map(id => byId.get(id)).filter(Boolean) as MenuRow[];
-  const available = asRows.filter(r =>
-    r.is_active &&
-    r.stock_current > r.stock_minimum &&
-    isInRange(cur, (r.available_start as any).toString().slice(0,5), (r.available_end as any).toString().slice(0,5))
-  );
-
-  available.sort((a,b)=>{
-    if (a.restaurant === prefer && b.restaurant !== prefer) return -1;
-    if (a.restaurant !== prefer && b.restaurant === prefer) return 1;
-    return 0;
-  });
-
-  return available.slice(0,3).map(r => ({
-    restaurant: r.restaurant,
-    id: r.id,
-    name: r.name,
-    price: r.price,
-    category: r.category
-  }));
-}
-
-function pickRandom<T>(arr: T[], count: number): T[] {
-  // shuffle simple + slice
-  const a = arr.slice();
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a.slice(0, count);
-}
-
+// Helpers de cross-sell
 function normName(s?: string){
   return (s ?? '')
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'') // quita acentos
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
     .toLowerCase().trim().replace(/\s+/g,' ');
 }
 
@@ -327,10 +283,10 @@ function pickCrossSellByCategory(
   chosen: Array<{id?:string; name:string; restaurant?:'rest1'|'rest2'}>,
   opts: {
     nowHHMM: string;
-    perCategoryCount: number;              // cuántos por categoría faltante
-    preferOppositeOf?: 'rest1'|'rest2';    // priorizar del opuesto
-    explicitType?: 'food'|'beverage'|'maintenance'; // fallback
-    forbidSameCategoryIfPresent?: boolean; // NO sugerir cat ya pedida
+    perCategoryCount: number;
+    preferOppositeOf?: 'rest1'|'rest2';
+    explicitType?: 'food'|'beverage'|'maintenance';
+    forbidSameCategoryIfPresent?: boolean;
   }
 ){
   const chosenIds = new Set(chosen.map(c => c.id).filter(Boolean) as string[]);
@@ -349,7 +305,6 @@ function pickCrossSellByCategory(
     chosenRows.map(r => r.category) as any
   );
 
-  // Fallback SIEMPRE: si el pedido dice type=food|beverage, asegúralo en chosenCats
   if (opts.explicitType === 'food' || opts.explicitType === 'beverage') {
     if (!chosenCats.has(opts.explicitType)) {
       chosenCats.add(opts.explicitType);
@@ -359,13 +314,10 @@ function pickCrossSellByCategory(
   // Determinar categorías faltantes
   const allCats = ['food','beverage','dessert'] as const;
   const targetCats: Array<'food'|'beverage'|'dessert'> = [];
-
   for (const cat of allCats) {
-    if (opts.forbidSameCategoryIfPresent && chosenCats.has(cat)) continue; // no sugerir mismas
+    if (opts.forbidSameCategoryIfPresent && chosenCats.has(cat)) continue;
     if (!chosenCats.has(cat)) targetCats.push(cat);
   }
-
-  // Si ya tenían las 3, puedes no sugerir nada (o quitar el if si quieres sugerir igualmente)
   if (targetCats.length === 0) return [];
 
   // Pool disponible
@@ -381,7 +333,7 @@ function pickCrossSellByCategory(
   for (const c of allCats) byCat.set(c, []);
   for (const r of available) byCat.get(r.category as any)!.push(r);
 
-  // Priorizar restaurante opuesto si se pide
+  // Priorizar restaurante opuesto si se pide (y solo cuando el ticket no es multi)
   if (opts.preferOppositeOf) {
     for (const cat of allCats) {
       const arr = byCat.get(cat)!;
@@ -393,12 +345,11 @@ function pickCrossSellByCategory(
     }
   }
 
-  // Random por categoría faltante
+  // Random simple por categoría faltante (shuffle + slice)
   const picks: any[] = [];
   for (const cat of targetCats) {
     const pool = byCat.get(cat) ?? [];
     if (!pool.length) continue;
-    // shuffle rápido
     for (let i = pool.length-1; i>0; i--){
       const j = Math.floor(Math.random()*(i+1));
       [pool[i], pool[j]] = [pool[j], pool[i]];
@@ -416,8 +367,8 @@ function pickCrossSellByCategory(
 const tool = createTool<AgentInput, AgentConfig>({
   metadata: {
     name: 'agent-03-roomservice-maintenance-split',
-    version: '2.2.0',
-    description: 'Room Service (rest1/rest2) + Maintenance con tablas separadas y cross-sell inter-restaurantes',
+    version: '2.3.0',
+    description: 'Room Service (rest1/rest2) + Maintenance con tablas separadas y cross-sell inter-restaurantes (multi-enabled)',
     capabilities: ['dynamic-menu','intelligent-cross-sell','ticket-tracking','feedback','policy-check'],
     author: 'Equipo A3',
     license: 'MIT',
@@ -429,7 +380,7 @@ const tool = createTool<AgentInput, AgentConfig>({
       guest_id: stringField({ required: true }),
       room: stringField({ required: true }),
 
-      restaurant: { type: 'string', required: false, enum: ['rest1','rest2'] },
+      restaurant: { type: 'string', required: false, enum: ['rest1','rest2','multi'] }, // acepta multi
       type: { type: 'string', required: false, enum: ['food','beverage','maintenance'] },
       items: {
         type: 'array', required: false, items: {
@@ -489,7 +440,7 @@ const tool = createTool<AgentInput, AgentConfig>({
     },
   },
 
-  async execute(input, config): Promise<ToolExecutionResult> {
+  execute: async (input, config): Promise<ToolExecutionResult> => {
     const { action = 'create', guest_id, room } = input;
 
     if (!guest_id || !room || typeof guest_id !== 'string' || typeof room !== 'string') {
@@ -522,22 +473,14 @@ const tool = createTool<AgentInput, AgentConfig>({
         };
       }
 
-      // Determine domain by classification (unless explicit)
+      // Determine domain by classification (once)
       const type = classify(input.text, input.items, input.type);
       const area = mapArea(type);
 
       // ---- CREATE
       if (action === 'create') {
-        // Determinar dominio/área
-        const type = classify(input.text, input.items, input.type);
-        const area = mapArea(type);
-
         if (type === 'food' || type === 'beverage') {
-          if (!input.restaurant) {
-            return { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'restaurant es requerido para Room Service' } };
-          }
-
-          // Policies: ventana + límite de gasto (de perfil o guests)
+          // Policies: ventana + DND
           const okWindow = withinWindow(
             input.now,
             input.access_window,
@@ -548,37 +491,65 @@ const tool = createTool<AgentInput, AgentConfig>({
             return { status: 'error', error: { code: 'ACCESS_WINDOW_BLOCK', message: 'Fuera de ventana o DND activo' } };
           }
 
-          const items = input.items ?? [];
+          const rawItems = input.items ?? [];
 
-          // Límite de gasto
+          // Si NO hay restaurant y TAMPOCO hay ítems, sí es error.
+          if (!input.restaurant && rawItems.length === 0) {
+            return { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'Provee restaurant o al menos un ítem' } };
+          }
+
+          // Límite de gasto preliminar (con el total de entrada)
+          let total: number = sumItems(rawItems);
           let spendLimit = input.guest_profile?.spend_limit;
           if (spendLimit == null) {
             const fromGuest = await dbGetGuestSpendLimit(guest_id);
             if (typeof fromGuest === 'number') spendLimit = Number(fromGuest);
           }
-          const total = sumItems(items);
           const dailySpend = input.guest_profile?.daily_spend ?? 0;
           if (spendLimit != null && (dailySpend + total) > spendLimit) {
             return { status: 'error', error: { code: 'SPEND_LIMIT', message: 'Límite de gasto excedido' } };
           }
 
-          // Stock/horario (opcional)
+          // Validación stock/horario + etiquetar restaurante por ítem
           const menu = await dbMenuUnion();
-          if (config.enable_stock_check && items.length) {
-            const cur = hhmm(input.now);
-            for (const it of items) {
+          const cur = hhmm(input.now);
+
+          if (config.enable_stock_check && rawItems.length) {
+            for (const it of rawItems) {
               const row = it.id
                 ? menu.find(m => m.id === it.id)
                 : menu.find(m => normName(m.name) === normName(it.name));
               if (!row) continue;
               const ok = row.is_active &&
-                        row.stock_current > row.stock_minimum &&
-                        isInRange(cur, row.available_start.toString().slice(0,5), row.available_end.toString().slice(0,5));
+                         row.stock_current > row.stock_minimum &&
+                         isInRange(cur, row.available_start.toString().slice(0,5), row.available_end.toString().slice(0,5));
               if (!ok) {
                 return { status: 'error', error: { code: 'ITEMS_UNAVAILABLE', message: `No disponible: ${row?.name ?? it.name}` } };
               }
             }
           }
+
+          const itemsWithRest = rawItems.map(it => {
+            const row = it.id
+              ? menu.find(m => m.id === it.id)
+              : menu.find(m => normName(m.name) === normName(it.name));
+            return { ...it, restaurant: it.restaurant ?? row?.restaurant };
+          });
+
+          const restSet = new Set((itemsWithRest.map(i => i.restaurant).filter(Boolean) as ('rest1'|'rest2')[]));
+
+          // Si input dijo 'multi', respétalo. Si no dijo nada: infiere por ítems.
+          // Si dijo rest1/rest2 y no hay ítems, úsalo como ancla.
+          const anchor = (input.restaurant === 'rest1' || input.restaurant === 'rest2') ? input.restaurant : undefined;
+          const ticketRestaurant:
+            'rest1'|'rest2'|'multi' =
+              input.restaurant === 'multi' ? 'multi'
+              : restSet.size > 1 ? 'multi'
+              : restSet.size === 1 ? Array.from(restSet)[0] as ('rest1'|'rest2')
+              : anchor ?? 'multi'; // nunca null, default a multi
+
+          // Recalcular total por si se modificó el array
+          total = sumItems(itemsWithRest);
 
           // Crear ticket RB
           const id = `REQ-${Date.now()}`;
@@ -586,31 +557,34 @@ const tool = createTool<AgentInput, AgentConfig>({
             id,
             guest_id,
             room,
-            restaurant: input.restaurant, // ancla; los ítems pueden venir de ambos
+            restaurant: ticketRestaurant, // 'rest1' | 'rest2' | 'multi'
             status: 'CREADO',
             priority: input.priority ?? 'normal',
-            items: items,
+            items: itemsWithRest,
             total_amount: total,
             notes: input.notes ?? undefined
           });
           await rbAddHistory({ request_id: id, status: 'CREADO', actor: 'system' });
           await rbUpdateTicket(id, { status: 'ACEPTADA' });
-          await rbAddHistory({ request_id: id, status: 'ACEPTADA', actor: input.restaurant });
+          await rbAddHistory({ request_id: id, status: 'ACEPTADA', actor: ticketRestaurant });
 
-          // Descontar stock y registrar consumo
-          await decrementStock(items);
-          if (total > 0) {
-            await addDailySpend(guest_id, total);
+          // “Ping” a cada restaurante involucrado (para visibilidad operacional)
+          for (const r of restSet) {
+            await rbAddHistory({ request_id: id, status: 'ACEPTADA', actor: r! });
           }
 
-          // Cross-sell: aleatorio por categorías faltantes (sin repetir la categoría ya pedida)
+          // Descontar stock + consumo
+          await decrementStock(itemsWithRest);
+          if (total > 0) await addDailySpend(guest_id, total);
+
+          // Cross-sell (si NO es multi, prioriza opuesto; si es multi, neutral)
           let cross: any[] = [];
-          if (config.enable_cross_sell && items.length >= (config.cross_sell_threshold ?? 1)) {
-            const preferOpposite = config.cross_sell_prefer_opposite
-              ? (input.restaurant === 'rest1' ? 'rest2' : 'rest1')
+          if (config.enable_cross_sell && itemsWithRest.length >= (config.cross_sell_threshold ?? 1)) {
+            const preferOpposite = (ticketRestaurant === 'rest1' || ticketRestaurant === 'rest2') && config.cross_sell_prefer_opposite
+              ? (ticketRestaurant === 'rest1' ? 'rest2' : 'rest1')
               : undefined;
 
-            cross = pickCrossSellByCategory(menu, items, {
+            cross = pickCrossSellByCategory(menu, itemsWithRest, {
               nowHHMM: hhmm(input.now),
               perCategoryCount: Math.max(1, Math.min(3, config.cross_sell_per_category_count ?? 1)),
               preferOppositeOf: preferOpposite as any,
@@ -633,14 +607,12 @@ const tool = createTool<AgentInput, AgentConfig>({
           };
         }
 
-        // --- maintenance (cuando type === 'maintenance')
+        // --- maintenance
         if (!input.issue) {
           return { status: 'error', error: { code: 'MISSING_ISSUE', message: 'Describe el issue de mantenimiento' } };
         }
 
-        // prioridad simple: severity high => high
         const computedPriority = (input.severity === 'high') ? 'high' : (input.priority ?? 'normal');
-
         const id = `REQ-${Date.now()}`;
         await mCreateTicket({
           id,
@@ -657,6 +629,57 @@ const tool = createTool<AgentInput, AgentConfig>({
         await mAddHistory({ request_id: id, status: 'ACEPTADA', actor: 'maintenance' });
 
         return { status: 'success', data: { request_id: id, domain: 'm', type, area, status: 'ACEPTADA' } };
+      }
+
+      // ---- Acciones posteriores (status/complete/assign/feedback/confirm)
+      if (!input.request_id) {
+        return { status: 'error', error: { code: 'MISSING_REQUEST_ID', message: 'request_id es requerido' } };
+      }
+
+      // intenta RB
+      const rb = await rbGetTicket(input.request_id);
+      if (rb) {
+        if (action === 'status') {
+          await rbUpdateTicket(input.request_id, { status: 'EN_PROCESO' });
+          await rbAddHistory({ request_id: input.request_id, status: 'EN_PROCESO', actor: rb.restaurant });
+          return { status: 'success', data: { request_id: input.request_id, domain: 'rb', status: 'EN_PROCESO' } };
+        }
+        if (action === 'complete') {
+          await rbUpdateTicket(input.request_id, { status: 'COMPLETADA' });
+          await rbAddHistory({ request_id: input.request_id, status: 'COMPLETADA', actor: rb.restaurant });
+          return { status: 'success', data: { request_id: input.request_id, domain: 'rb', status: 'COMPLETADA' } };
+        }
+        if (action === 'assign') {
+          await rbAddHistory({ request_id: input.request_id, status: rb.status, actor: rb.restaurant, note: 'Reasignado (demo)' });
+          return { status: 'success', data: { request_id: input.request_id, domain: 'rb', status: rb.status, message: 'Reasignado' } };
+        }
+        if (action === 'feedback' || action === 'confirm_service') {
+          if (action === 'confirm_service') {
+            await rbUpdateTicket(input.request_id, { status: 'COMPLETADA' });
+            await rbAddHistory({
+              request_id: input.request_id,
+              status: 'COMPLETADA',
+              actor: input.service_completed_by || rb.restaurant,
+              note: input.service_feedback ? `Rating: ${input.service_rating ?? ''} - ${input.service_feedback}` : undefined
+            });
+          }
+          if (input.service_rating || input.service_feedback) {
+            await addFeedback({
+              domain: 'rb',
+              guest_id,
+              request_id: input.request_id,
+              message: input.service_feedback,
+              rating: input.service_rating
+            });
+
+            if ((input.service_rating ?? 5) <= 2 && rb.status !== 'COMPLETADA') {
+              await rbUpdateTicket(input.request_id, { priority: 'high' });
+              await rbAddHistory({ request_id: input.request_id, status: rb.status, actor: 'system', note: 'Escalado por feedback negativo' });
+            }
+          }
+          return { status: 'success', data: { request_id: input.request_id, domain: 'rb', status: action === 'confirm_service' ? 'COMPLETADA' : rb.status, feedbackSaved: !!(input.service_rating || input.service_feedback) } };
+        }
+        return { status: 'error', error: { code: 'UNKNOWN_ACTION', message: 'Acción no soportada para RB' } };
       }
 
       // intenta M
@@ -695,7 +718,6 @@ const tool = createTool<AgentInput, AgentConfig>({
               rating: input.service_rating
             });
 
-            // Escalar prioridad si rating <= 2 y no está completado
             if ((input.service_rating ?? 5) <= 2 && mt.status !== 'COMPLETADA') {
               await mUpdateTicket(input.request_id, { priority: 'high' });
               await mAddHistory({ request_id: input.request_id, status: mt.status, actor: 'system', note: 'Escalado por feedback negativo' });
