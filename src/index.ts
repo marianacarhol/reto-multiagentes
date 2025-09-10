@@ -15,6 +15,8 @@ import {
   type ToolExecutionResult,
 } from '@ai-spine/tools';
 import { createClient } from '@supabase/supabase-js';
+import fs from 'fs';
+import path from 'path';
 
 type ServiceType = 'food' | 'beverage' | 'maintenance';
 type TicketStatus = 'CREADO' | 'ACEPTADA' | 'EN_PROCESO' | 'COMPLETADA';
@@ -412,7 +414,7 @@ function pickCrossSellByCategory(
 }
 
 // ============ Tool ============
-const tool = createTool<AgentInput, AgentConfig>({
+const tool = ({
   metadata: {
     name: 'agent-03-roomservice-maintenance-split',
     version: '2.3.1',
@@ -486,7 +488,7 @@ const tool = createTool<AgentInput, AgentConfig>({
     },
   },
 
-  execute: async (input, config): Promise<ToolExecutionResult> => {
+  async execute (input: AgentInput, config: any): Promise<ToolExecutionResult> {
     const { action = 'create', guest_id, room } = input;
 
     if (!guest_id || !room || typeof guest_id !== 'string' || typeof room !== 'string') {
@@ -760,11 +762,28 @@ const tool = createTool<AgentInput, AgentConfig>({
       return { status: 'error', error: { code: 'INTERNAL_DB_ERROR', message: String(e?.message || e) } };
     }
   },
+
+  async start(config: any) {
+    console.log(`Servidor arrancado en puerto ${config.port}`);
+  }
 });
 
 // ============ Server bootstrap ============
 async function main(){
   try{
+    // 1️⃣ Leer JSON de ticket
+    const jsonPath = path.resolve('./input.json');
+    if (fs.existsSync(jsonPath)) {
+      const raw = fs.readFileSync(jsonPath, 'utf-8');
+      const inputData = JSON.parse(raw) as AgentInput;
+
+      console.log('🔹 Creando ticket desde input.json...');
+      const result = await tool.execute(inputData, {});
+      console.log('✅ Ticket creado:', result);
+    } else {
+      console.log('No se encontró ticket.json, se salta creación automática.');
+    }
+
     await tool.start({
       port: process.env.PORT ? parseInt(process.env.PORT,10) : 3000,
       host: process.env.HOST || '0.0.0.0',
@@ -780,6 +799,7 @@ async function main(){
   } catch (e) {
     console.error('Failed to start:', e);
     process.exit(1);
+
   }
 }
 

@@ -1,0 +1,10 @@
+{
+  "action": "create",
+  "guest_id": "G-1",
+  "room": "101",
+  "items": [
+    { "name": "Chilaquiles Verdes", "qty": 2 },
+    { "name": "Café Americano", "qty": 1 }
+  ],
+  "notes": "sin cebolla, porfa"
+}
