@@ -1,12 +1,9 @@
 {
-   "action": "create",
-  "guest_id": "g1",
-  "room": "402",
-  "type": "maintenance",
-  "issue": "Aire acondicionado hace ruido",
-  "severity": "medium",
-  "priority": "normal",
-  "notes": "Cliente pide revisión hoy",
-  "service_hours": "09:00-12:00",
-  "now": "2025-09-11T06:30:00Z"
-}
+    "action": "create",
+    "guest_id": "G-1",
+    "room": "1205",
+    "items": [
+      { "name": "Ensalada César" }
+    ],
+    "notes": "con mucha ensalada y mucho césar"
+  }

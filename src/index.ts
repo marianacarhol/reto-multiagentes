@@ -69,7 +69,6 @@ interface AgentInput {
   request_id?: string;
 
   // Confirmación/Feedback
-  service_rating?: number;      // 1-5
   service_feedback?: string;
   service_completed_by?: string;
 
@@ -329,7 +328,12 @@ async function rbUpdateTicket(id: string, patch: Partial<{status: TicketStatus; 
   if (error) throw error;
 }
 async function rbGetTicket(id: string){ const { data, error } = await supabase.from('tickets_rb').select('*').eq('id', id).maybeSingle(); if (error) throw error; return data as any | null; }
-async function rbAddHistory(h: {request_id: string; status: string; actor: string; note?: string}){ const { error } = await supabase.from('ticket_history_rb').insert({ ...h, ts: nowISO() }); if (error) throw error; }
+async function rbAddHistory(h: {request_id: string; status: string; actor: string; note?: string; feedback?: string}) {
+  const { error } = await supabase
+    .from('ticket_history_rb')
+    .insert({ ...h, ts: nowISO() });
+  if (error) throw error;
+}
 
 async function mCreateTicket(row: {
   id: string; guest_id: string; room: string; issue: string; severity?: string;
@@ -340,10 +344,7 @@ async function mCreateTicket(row: {
   if (error) throw error;
 }
 async function mGetTicket(id: string){ const { data, error } = await supabase.from('tickets_m').select('*').eq('id', id).maybeSingle(); if (error) throw error; return data as any | null; }
-async function mAddHistory(h: {
-  request_id: string; status: string; actor: string; note?: string;
-  service_hours?: string; // ← NUEVO
-}) {
+async function mAddHistory(h: {request_id: string; status: string; actor: string; note?: string; feedback?: string; service_hours?: string}) {
   const { error } = await supabase
     .from('ticket_history_m')
     .insert({ ...h, ts: nowISO() });
@@ -357,14 +358,12 @@ async function addFeedback(rec: {
   guest_id: string;
   request_id: string;
   message?: string;
-  rating?: number;
 }){
   const { error } = await supabase.from('feedback').insert({
     domain: rec.domain,
     guest_id: rec.guest_id,
     request_id: rec.request_id,
     message: rec.message ?? null,
-    rating: rec.rating ?? null,
     created_at: nowISO(),
   });
   if (error) throw error;
@@ -504,7 +503,6 @@ const tool = createTool<AgentInput, AgentConfig>({
       }},
 
       request_id: stringField({ required: false }),
-      service_rating: numberField({ required: false, min: 1, max: 5 }),
       service_feedback: stringField({ required: false }),
       service_completed_by: stringField({ required: false }),
 
@@ -606,6 +604,7 @@ const tool = createTool<AgentInput, AgentConfig>({
             : anchor ?? 'multi';
 
           const id = `REQ-${Date.now()}`;
+
           await rbCreateTicket({
             id,
             guest_id: guest_id!,
@@ -618,7 +617,12 @@ const tool = createTool<AgentInput, AgentConfig>({
             notes: input.notes ?? undefined
           });
 
-          await rbAddHistory({ request_id: id, status: 'CREADO', actor: 'system' });
+          await rbAddHistory({
+            request_id: id,
+            status: 'CREADO',
+            actor: 'system'
+          });
+
 
           return { status: 'success', data: { request_id: id, domain: 'rb', type, area, status: 'CREADO', message: 'Ticket creado. Usa action "accept" o "reject".' } };
         }
@@ -642,6 +646,8 @@ const tool = createTool<AgentInput, AgentConfig>({
           actor: 'system',
           service_hours: input.service_hours ?? null
         });
+
+
 
 
 
@@ -712,19 +718,79 @@ const tool = createTool<AgentInput, AgentConfig>({
         else if (action === 'complete') newStatus = 'COMPLETADA';
         else if (action === 'status') return { status: 'success', data: { request_id: ticket.id, status: ticket.status } };
         else if (action === 'cancel') newStatus = 'CANCELADO';
-
-        const { error } = await supabase.from('tickets_m').update({ status: newStatus, updated_at: nowISO() }).eq('id', ticket.id);
-        if (error) throw error;
         await mAddHistory({
           request_id: ticket.id,
           status: newStatus,
           actor: 'agent',
           note: input.notes,
-          service_hours: input.service_hours ?? ticket.service_hours ?? null
+          service_hours: input.service_hours ?? null
         });
 
         return { status: 'success', data: { request_id: ticket.id, status: newStatus } };
       }
+
+if (action === 'feedback') {
+  if (!input.request_id) {
+    return { status: 'error', error: { code: 'MISSING_REQUEST_ID', message: 'request_id es requerido' } };
+  }
+
+  // Determinar ticket y dominio
+  const ticketRB = await rbGetTicket(input.request_id);
+  const ticketM  = ticketRB ? null : await mGetTicket(input.request_id);
+  if (!ticketRB && !ticketM) {
+    return { status: 'error', error: { code: 'NOT_FOUND', message: 'Ticket no encontrado' } };
+  }
+
+  const domain: 'rb'|'m' = ticketRB ? 'rb' : 'm';
+  const guest_id = (ticketRB ?? ticketM)!.guest_id;
+
+  // Nada que guardar
+  if (input.service_feedback == null) {
+    return { status: 'error', error: { code: 'EMPTY_FEEDBACK', message: 'Provee service_feedback' } };
+  }
+
+  // 1) Tabla central "feedback" (opcional, si la usas)
+  await addFeedback({
+    domain,
+    guest_id,
+    request_id: input.request_id,
+    message: input.service_feedback,
+  });
+
+  // 2) Actualiza columna feedback en la tabla de tickets
+  if (domain === 'rb') {
+    await supabase
+      .from('tickets_rb')
+      .update({ feedback: input.service_feedback ?? null, updated_at: nowISO() })
+      .eq('id', input.request_id);
+
+    // 3) Línea en el historial (si tu history tiene columna feedback la usamos, si no, usa note)
+    await rbAddHistory({
+      request_id: input.request_id,
+      status: 'FEEDBACK',
+      actor: 'guest',
+      feedback: input.service_feedback,        // <-- si tu tabla history_rb tiene columna feedback
+      // note: input.service_feedback,         // <-- usa esta línea en lugar de "feedback:" si NO existe la columna
+    });
+
+  } else {
+    await supabase
+      .from('tickets_m')
+      .update({ feedback: input.service_feedback ?? null, updated_at: nowISO() })
+      .eq('id', input.request_id);
+
+    await mAddHistory({
+      request_id: input.request_id,
+      status: 'FEEDBACK',
+      actor: 'guest',
+      feedback: input.service_feedback,        // <-- si tu tabla history_m tiene columna feedback
+      // note: input.service_feedback,         // <-- usa esta línea en lugar de "feedback:" si NO existe la columna
+    });
+  }
+
+  return { status: 'success', data: { request_id: input.request_id, domain, message: 'Feedback guardado' } };
+}
+
 
       const rb = await rbGetTicket(input.request_id);
       if (rb) return await handleRB(rb);
@@ -750,6 +816,8 @@ function askYesNo(question: string): Promise<boolean> {
     });
   });
 }
+
+
 
 // ===== INIT: postear ./input.json y luego decision interactiva o automática
 async function runInitFlow(baseUrl: string) {
@@ -859,16 +927,37 @@ async function main(){
         rl.question(`¿Se completó el pedido ${requestId}? [y/n]: `, async (answer) => {
             rl.close();
 
-            // y/yes/sí -> complete, cualquier otra -> cancel
-            const compDecision = /^y(es)?$|^s(i|í)?$/i.test(answer.trim()) ? 'complete' : 'cancel';
+// y/yes/sí -> complete, cualquier otra -> cancel
+const compDecision = /^y(es)?$|^s(i|í)?$/i.test(answer.trim()) ? 'complete' : 'cancel';
 
-            const compResp = await fetch(`${baseUrl}/api/execute`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ input_data: { action: compDecision, request_id: requestId } }),
-            });
-            const actJson = await compResp.json();
-            console.log(`INIT ${decision}:`, actJson);
+const compResp = await fetch(`${baseUrl}/api/execute`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ input_data: { action: compDecision, request_id: requestId } }),
+});
+const actJson2 = await compResp.json();
+console.log(`INIT ${compDecision}:`, actJson2);
+
+// Si se completó, pedir feedback y guardarlo
+if (compDecision === 'complete') {
+  const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  rl2.question('Comentario (opcional, ENTER para omitir): ', async (comment) => {
+      rl2.close();
+
+      const payload: any = { action: 'feedback', request_id: requestId };
+      if (comment && comment.trim()) payload.service_feedback = comment.trim();
+
+      const fbResp = await fetch(`${baseUrl}/api/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input_data: payload }),
+      });
+      const fbJson = await fbResp.json();
+      console.log('FEEDBACK:', fbJson);
+    });
+
+}
         });
         }
 
