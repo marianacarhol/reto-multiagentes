@@ -1,5 +1,5 @@
 {
-  "action": "create",
+   "action": "create",
   "guest_id": "g1",
   "room": "402",
   "type": "maintenance",

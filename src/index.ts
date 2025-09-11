@@ -32,10 +32,10 @@ import path from 'path';
 import readline from 'readline';
 
 type ServiceType = 'food' | 'beverage' | 'maintenance';
-type TicketStatus = 'CREADO' | 'ACEPTADA' | 'EN_PROCESO' | 'COMPLETADA' | 'RECHAZADA';
+type TicketStatus = 'CREADO' | 'ACEPTADA' | 'EN_PROCESO' | 'COMPLETADA' | 'RECHAZADA' | 'CANCELADO';
 
 interface AgentInput {
-  action?: 'get_menu' | 'create' | 'status' | 'complete' | 'assign' | 'feedback' | 'confirm_service' | 'accept' | 'reject';
+  action?: 'get_menu' | 'create' | 'status' | 'complete' | 'assign' | 'feedback' | 'confirm_service' | 'accept' | 'reject' | 'cancel';
 
   // Identidad básica
   guest_id?: string;
@@ -468,7 +468,7 @@ const tool = createTool<AgentInput, AgentConfig>({
 
   schema: {
     input: {
-      action: { type: 'string', enum: ['get_menu','create','status','complete','assign','feedback','confirm_service','accept','reject'], required: false, default: 'create' },
+      action: { type: 'string', enum: ['get_menu','create','status','complete','assign','feedback','confirm_service','accept','reject','cancel'], required: false, default: 'create' },
       guest_id: stringField({ required: false }),
       room: stringField({ required: false }),
 
@@ -660,6 +660,7 @@ const tool = createTool<AgentInput, AgentConfig>({
         else if (action === 'status') {
           return { status: 'success', data: { request_id: ticket.id, status: ticket.status } };
         }
+        else if (action === 'cancel') newStatus = 'CANCELADO';
 
         // Actualiza estado del ticket
         const { error } = await supabase
@@ -683,7 +684,7 @@ const tool = createTool<AgentInput, AgentConfig>({
             // 3) pings por restaurante
             const restSet = new Set<string>((ticket.items || []).map((i: any) => i.restaurant).filter(Boolean));
             for (const r of restSet) {
-              await rbAddHistory({ request_id: ticket.id, status: 'ACEPTADA', actor: r });
+              await rbAddHistory({ request_id: ticket.id, status: ticket.status, actor: r });
             }
           } catch (e:any) {
             // deja constancia y revierte estado a CREADO
@@ -710,6 +711,7 @@ const tool = createTool<AgentInput, AgentConfig>({
         else if (action === 'reject') newStatus = 'RECHAZADA';
         else if (action === 'complete') newStatus = 'COMPLETADA';
         else if (action === 'status') return { status: 'success', data: { request_id: ticket.id, status: ticket.status } };
+        else if (action === 'cancel') newStatus = 'CANCELADO';
 
         const { error } = await supabase.from('tickets_m').update({ status: newStatus, updated_at: nowISO() }).eq('id', ticket.id);
         if (error) throw error;
@@ -850,6 +852,26 @@ async function main(){
       });
       const actJson = await actResp.json();
       console.log(`INIT ${decision}:`, actJson);
+
+      // 4) Si se aceptó, preguntar si se completó o cancelar
+        if (decision === 'accept') {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        rl.question(`¿Se completó el pedido ${requestId}? [y/n]: `, async (answer) => {
+            rl.close();
+
+            // y/yes/sí -> complete, cualquier otra -> cancel
+            const compDecision = /^y(es)?$|^s(i|í)?$/i.test(answer.trim()) ? 'complete' : 'cancel';
+
+            const compResp = await fetch(`${baseUrl}/api/execute`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ input_data: { action: compDecision, request_id: requestId } }),
+            });
+            const actJson = await compResp.json();
+            console.log(`INIT ${decision}:`, actJson);
+        });
+        }
+
     });
 
   } catch (e) {
