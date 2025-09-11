@@ -4,23 +4,22 @@
  * - Menú dinámico por restaurante (rest1/rest2) con horarios
  * - Ítems de entrada: sólo name (+qty opcional); precio/stock/horario/restaurant desde BD
  * - Tickets RB/M, feedback y cross-sell
- * - INIT: al iniciar, lee ./input.json, crea ticket y luego:
- *     - si INTERACTIVE_DECIDE=true -> pregunta por terminal [y/n]
- *     - si no, usa INIT_DECISION=accept|reject (default accept)
+ * - INIT opcional: lee ./input.json y ejecuta flujo create -> accept/reject
  *
  * ENV:
  *  - INIT_ON_START=true|false         (default true)
- *  - INIT_JSON_PATH=./input.json      (ruta al json inicial)
- *  - INTERACTIVE_DECIDE=true|false    (default false -> usa INIT_DECISION)
+ *  - INIT_JSON_PATH=./input.json
+ *  - INTERACTIVE_DECIDE=true|false    (default false)
  *  - INIT_DECISION=accept|reject      (default accept)
  *  - API_KEY_AUTH=true|false
  *  - VALID_API_KEYS=key1,key2
  *  - SUPABASE_URL, SUPABASE_SERVICE_ROLE
+ *  - PRIORITY_API_URL=http://localhost:8000/predict
  */
 import 'dotenv/config';
 type ServiceType = 'food' | 'beverage' | 'maintenance';
 interface AgentInput {
-    action?: 'get_menu' | 'create' | 'status' | 'complete' | 'assign' | 'feedback' | 'confirm_service' | 'accept' | 'reject';
+    action?: 'get_menu' | 'create' | 'status' | 'complete' | 'assign' | 'feedback' | 'confirm_service' | 'accept' | 'reject' | 'cancel';
     guest_id?: string;
     room?: string;
     restaurant?: 'rest1' | 'rest2' | 'multi';
@@ -48,10 +47,10 @@ interface AgentInput {
         end: string;
     };
     request_id?: string;
-    service_rating?: number;
     service_feedback?: string;
     service_completed_by?: string;
     menu_category?: 'food' | 'beverage' | 'dessert';
+    service_hours?: string;
 }
 interface AgentConfig {
     accessWindowStart?: string;

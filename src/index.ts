@@ -1,21 +1,21 @@
+// index.ts
 /**
  * Agent-03 RoomService & Maintenance Tool (Multi-Restaurant)
  * v2.3.4
  * - Menú dinámico por restaurante (rest1/rest2) con horarios
  * - Ítems de entrada: sólo name (+qty opcional); precio/stock/horario/restaurant desde BD
  * - Tickets RB/M, feedback y cross-sell
- * - INIT: al iniciar, lee ./input.json, crea ticket y luego:
- *     - si INTERACTIVE_DECIDE=true -> pregunta por terminal [y/n]
- *     - si no, usa INIT_DECISION=accept|reject (default accept)
+ * - INIT opcional: lee ./input.json y ejecuta flujo create -> accept/reject
  *
  * ENV:
  *  - INIT_ON_START=true|false         (default true)
- *  - INIT_JSON_PATH=./input.json      (ruta al json inicial)
- *  - INTERACTIVE_DECIDE=true|false    (default false -> usa INIT_DECISION)
+ *  - INIT_JSON_PATH=./input.json
+ *  - INTERACTIVE_DECIDE=true|false    (default false)
  *  - INIT_DECISION=accept|reject      (default accept)
  *  - API_KEY_AUTH=true|false
  *  - VALID_API_KEYS=key1,key2
  *  - SUPABASE_URL, SUPABASE_SERVICE_ROLE
+ *  - PRIORITY_API_URL=http://localhost:8000/predict
  */
 
 import 'dotenv/config';
@@ -139,6 +139,73 @@ function normName(s?: string){
     .toLowerCase().trim().replace(/\s+/g,' ');
 }
 
+// ===== PRIORITY (TF-IDF + LogReg servido en FastAPI) =====
+const PRIORITY_API_URL = process.env.PRIORITY_API_URL || 'http://localhost:8000/predict';
+
+function calcEtaToSLA(params: {
+  domain: 'rb'|'m';
+  type?: ServiceType;
+  createdAtISO?: string;
+}) {
+  const now = new Date();
+  const created = params.createdAtISO ? new Date(params.createdAtISO) : now;
+  const elapsedMin = Math.floor((now.getTime() - created.getTime()) / 60000);
+  const slaMin = params.domain === 'rb' ? 45 : 120; // ajusta a tus SLAs reales
+  return slaMin - elapsedMin;
+}
+
+type PriorityOut = {
+  priority: 'low'|'medium'|'high';
+  score: number;
+  proba?: Record<string, number>;
+  needs_review?: boolean;
+  model?: string;
+};
+
+function hardRulesFallback(payload: { text?: string; vip?: boolean|number; eta_to_sla_min?: number; }): PriorityOut {
+  const t = (payload.text || '').toLowerCase();
+  const danger = /(fuga|leak|humo|incendio|chispa|descarga|sangre|shock|smoke|fire)/i.test(t);
+  if (danger) return { priority: 'high', score: 95, model: 'rules' };
+  const soon = (payload.eta_to_sla_min ?? 999) < 30;
+  const vip = !!payload.vip;
+  if (soon && vip) return { priority: 'high', score: 80, model: 'rules' };
+  if (soon) return { priority: 'medium', score: 65, model: 'rules' };
+  return { priority: 'low', score: 30, model: 'rules' };
+}
+
+async function getPriorityFromAPI(input: {
+  text: string;
+  domain: 'rb'|'m';
+  vip: 0|1;
+  spend30d: number;
+  eta_to_sla_min: number;
+}): Promise<PriorityOut> {
+  try {
+    const res = await fetch(PRIORITY_API_URL, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) throw new Error(`priority api ${res.status}`);
+    const json = await res.json();
+    let p = (json.priority || '').toLowerCase();
+    if (!['low','medium','high'].includes(p)) p = 'medium';
+    return {
+      priority: p as 'low'|'medium'|'high',
+      score: Number(json.score ?? 0),
+      proba: json.proba,
+      needs_review: !!json.needs_review,
+      model: json.model || 'tfidf_logreg_v1'
+    };
+  } catch (_e) {
+    return hardRulesFallback({
+      text: input.text,
+      vip: input.vip,
+      eta_to_sla_min: input.eta_to_sla_min
+    });
+  }
+}
+
 // ===== DB helpers
 async function dbGetGuestSpendLimit(guest_id: string){
   const { data, error } = await supabase.from('guests')
@@ -164,7 +231,6 @@ type MenuRow = {
 };
 
 // ===== Spend helpers =====
-// Suma lo gastado HOY (UTC) leyendo spend_ledger por occurred_at en rango [00:00, 24:00)
 async function dbGetSpentToday(guest_id: string){
   const start = new Date();
   start.setUTCHours(0,0,0,0);
@@ -199,14 +265,13 @@ async function ledgerInsertOnce(rec: {
         amount: rec.amount,
         occurred_at: nowISO(),
       }],
-      { onConflict: 'guest_id,request_id', ignoreDuplicates: true } // ← cambio aquí
+      { onConflict: 'guest_id,request_id', ignoreDuplicates: true }
     );
   if (error) throw error;
 }
 
 // Intenta RPC decremental atómica; si no existe la RPC, hace fallback 2 pasos
 async function decrementGuestLimitIfEnough(guest_id: string, amount: number) {
-  // 1) Intento con RPC (si existe)
   try {
     const { data, error } = await supabase
       .rpc('decrement_guest_limit_if_enough', { p_guest_id: guest_id, p_amount: amount });
@@ -216,9 +281,8 @@ async function decrementGuestLimitIfEnough(guest_id: string, amount: number) {
       err.code = 'SPEND_LIMIT';
       throw err;
     }
-    return; // ok
+    return;
   } catch (_e) {
-    // 2) Fallback no atómico (dos pasos)
     const { data, error } = await supabase
       .from('guests')
       .select('spend_limit')
@@ -240,7 +304,7 @@ async function decrementGuestLimitIfEnough(guest_id: string, amount: number) {
   }
 }
 
-// Cobra un ticket RB: idempotente (ledger) + descuenta límite; revierte ledger si falla el descuento
+// Cobra un ticket RB
 async function chargeGuestForRB(ticket: { id: string; guest_id: string; total_amount: number }) {
   const amount = Number(ticket.total_amount || 0);
   if (amount <= 0) return;
@@ -248,7 +312,6 @@ async function chargeGuestForRB(ticket: { id: string; guest_id: string; total_am
   try {
     await decrementGuestLimitIfEnough(ticket.guest_id, amount);
   } catch (e:any) {
-    // compensar ledger si no se pudo descontar límite
     await supabase.from('spend_ledger')
       .delete()
       .eq('domain', 'rb')
@@ -323,6 +386,7 @@ async function rbCreateTicket(row: {
   id: string; guest_id: string; room: string; restaurant: 'rest1'|'rest2'|'multi';
   status: TicketStatus; priority: string; items: any; total_amount: number; notes?: string;
 }){ const { error } = await supabase.from('tickets_rb').insert(row); if (error) throw error; }
+
 async function rbUpdateTicket(id: string, patch: Partial<{status: TicketStatus; priority:string; notes:string}>){
   const { error } = await supabase.from('tickets_rb').update({ ...patch, updated_at: nowISO() }).eq('id', id);
   if (error) throw error;
@@ -338,7 +402,8 @@ async function rbAddHistory(h: {request_id: string; status: string; actor: strin
 async function mCreateTicket(row: {
   id: string; guest_id: string; room: string; issue: string; severity?: string;
   status: TicketStatus; priority: string; notes?: string;
-  service_hours?: string; // ← NUEVO
+  service_hours?: string | null;
+  priority_score?: number; priority_model?: string; priority_proba?: any; needs_review?: boolean;
 }) {
   const { error } = await supabase.from('tickets_m').insert(row);
   if (error) throw error;
@@ -384,7 +449,7 @@ async function decrementStock(items: Array<{id?:string; name:string; restaurant?
   }
 }
 
-// Cross-sell
+// Cross-sell (usado si habilitas cross-sell)
 function pickCrossSellByCategory(
   menu: MenuRow[],
   chosen: Array<{id?:string; name:string; restaurant?:'rest1'|'rest2'}>,
@@ -454,7 +519,7 @@ function pickCrossSellByCategory(
   return picks;
 }
 
-// ===== Tool (execute con 3 parámetros)
+// ===== Tool
 const tool = createTool<AgentInput, AgentConfig>({
   metadata: {
     name: 'agent-03-roomservice-maintenance-split',
@@ -472,7 +537,6 @@ const tool = createTool<AgentInput, AgentConfig>({
       room: stringField({ required: false }),
 
       service_hours: stringField({ required: false }),
-
 
       restaurant: { type: 'string', required: false, enum: ['rest1','rest2','multi'] },
       type: { type: 'string', required: false, enum: ['food','beverage','maintenance'] },
@@ -568,6 +632,7 @@ const tool = createTool<AgentInput, AgentConfig>({
 
       // CREATE
       if (action === 'create') {
+        // ======== ROOM SERVICE (food/beverage) — SIN IA ========
         if (type === 'food' || type === 'beverage') {
           const okWindow = withinWindow(input.now, input.access_window, { start: config.accessWindowStart, end: config.accessWindowEnd }, input.do_not_disturb);
           if (!okWindow) return { status: 'error', error: { code: 'ACCESS_WINDOW_BLOCK', message: 'Fuera de ventana o DND activo' } };
@@ -603,7 +668,9 @@ const tool = createTool<AgentInput, AgentConfig>({
             : restSet.size === 1 ? Array.from(restSet)[0] as ('rest1'|'rest2')
             : anchor ?? 'multi';
 
+          // SIN IA: prioridad directa (o default 'normal')
           const id = `REQ-${Date.now()}`;
+          const priorityLabelRB = input.priority ?? 'normal';
 
           await rbCreateTicket({
             id,
@@ -611,7 +678,7 @@ const tool = createTool<AgentInput, AgentConfig>({
             room: room!,
             restaurant: ticketRestaurant,
             status: 'CREADO',
-            priority: input.priority ?? 'normal',
+            priority: priorityLabelRB,
             items: resolved,
             total_amount: total,
             notes: input.notes ?? undefined
@@ -623,21 +690,38 @@ const tool = createTool<AgentInput, AgentConfig>({
             actor: 'system'
           });
 
-
           return { status: 'success', data: { request_id: id, domain: 'rb', type, area, status: 'CREADO', message: 'Ticket creado. Usa action "accept" o "reject".' } };
         }
 
-        // maintenance
+        // ======== MANTENIMIENTO — CON IA ========
         if (!input.issue) return { status: 'error', error: { code: 'MISSING_ISSUE', message: 'Describe el issue de mantenimiento' } };
 
-        const computedPriority = input.severity === 'high' ? 'high' : input.priority ?? 'normal';
         const id = `REQ-${Date.now()}`;
+        const eta_to_sla_min_m = calcEtaToSLA({ domain: 'm', type, createdAtISO: input.now });
+        const priM = await getPriorityFromAPI({
+          text: input.issue || input.text || '',
+          domain: 'm',
+          vip: (input.guest_profile?.tier === 'platinum' || input.guest_profile?.tier === 'gold') ? 1 : 0,
+          spend30d: Number(input.guest_profile?.daily_spend ?? 0),
+          eta_to_sla_min: eta_to_sla_min_m,
+        });
+
+        const severityM = input.severity ?? priM.priority;
+        const priorityLabelM =
+          severityM === 'high' ? 'high' :
+          severityM === 'low'  ? 'low'  :
+          (input.priority ?? 'normal');
+
         await mCreateTicket({
           id, guest_id: guest_id!, room: room!,
-          issue: input.issue, severity: input.severity,
-          status: 'CREADO', priority: computedPriority,
+          issue: input.issue, severity: severityM,
+          status: 'CREADO', priority: priorityLabelM,
           notes: input.notes ?? undefined,
-          service_hours: input.service_hours ?? null   // ← NUEVO
+          service_hours: input.service_hours ?? null,
+          priority_score: priM.score,
+          priority_model: priM.model,
+          priority_proba: priM.proba ?? null,
+          needs_review: !!priM.needs_review
         });
 
         await mAddHistory({
@@ -646,10 +730,6 @@ const tool = createTool<AgentInput, AgentConfig>({
           actor: 'system',
           service_hours: input.service_hours ?? null
         });
-
-
-
-
 
         return { status: 'success', data: { request_id: id, domain: 'm', type, area, status: 'CREADO', message: 'Ticket creado. Usa action "accept" o "reject".' } };
       }
@@ -668,32 +748,23 @@ const tool = createTool<AgentInput, AgentConfig>({
         }
         else if (action === 'cancel') newStatus = 'CANCELADO';
 
-        // Actualiza estado del ticket
         const { error } = await supabase
           .from('tickets_rb')
           .update({ status: newStatus, updated_at: nowISO() })
           .eq('id', ticket.id);
         if (error) throw error;
 
-        // Historial de la decisión
         await rbAddHistory({ request_id: ticket.id, status: newStatus, actor: 'agent', note: input.notes });
 
-        // Si se aceptó: COBRAR (idempotente) + bajar stock + ping por restaurante
         if (action === 'accept') {
           try {
-            // 1) cobro + descuento de límite (reversible si falla)
             await chargeGuestForRB({ id: ticket.id, guest_id: ticket.guest_id, total_amount: ticket.total_amount });
-
-            // 2) stock
             await decrementStock(ticket.items || []);
-
-            // 3) pings por restaurante
             const restSet = new Set<string>((ticket.items || []).map((i: any) => i.restaurant).filter(Boolean));
             for (const r of restSet) {
               await rbAddHistory({ request_id: ticket.id, status: ticket.status, actor: r });
             }
           } catch (e:any) {
-            // deja constancia y revierte estado a CREADO
             await rbAddHistory({
               request_id: ticket.id,
               status: ticket.status,
@@ -729,68 +800,60 @@ const tool = createTool<AgentInput, AgentConfig>({
         return { status: 'success', data: { request_id: ticket.id, status: newStatus } };
       }
 
-if (action === 'feedback') {
-  if (!input.request_id) {
-    return { status: 'error', error: { code: 'MISSING_REQUEST_ID', message: 'request_id es requerido' } };
-  }
+      if (action === 'feedback') {
+        if (!input.request_id) {
+          return { status: 'error', error: { code: 'MISSING_REQUEST_ID', message: 'request_id es requerido' } };
+        }
 
-  // Determinar ticket y dominio
-  const ticketRB = await rbGetTicket(input.request_id);
-  const ticketM  = ticketRB ? null : await mGetTicket(input.request_id);
-  if (!ticketRB && !ticketM) {
-    return { status: 'error', error: { code: 'NOT_FOUND', message: 'Ticket no encontrado' } };
-  }
+        const ticketRB = await rbGetTicket(input.request_id);
+        const ticketM  = ticketRB ? null : await mGetTicket(input.request_id);
+        if (!ticketRB && !ticketM) {
+          return { status: 'error', error: { code: 'NOT_FOUND', message: 'Ticket no encontrado' } };
+        }
 
-  const domain: 'rb'|'m' = ticketRB ? 'rb' : 'm';
-  const guest_id = (ticketRB ?? ticketM)!.guest_id;
+        const domain: 'rb'|'m' = ticketRB ? 'rb' : 'm';
+        const guest_id = (ticketRB ?? ticketM)!.guest_id;
 
-  // Nada que guardar
-  if (input.service_feedback == null) {
-    return { status: 'error', error: { code: 'EMPTY_FEEDBACK', message: 'Provee service_feedback' } };
-  }
+        if (input.service_feedback == null) {
+          return { status: 'error', error: { code: 'EMPTY_FEEDBACK', message: 'Provee service_feedback' } };
+        }
 
-  // 1) Tabla central "feedback" (opcional, si la usas)
-  await addFeedback({
-    domain,
-    guest_id,
-    request_id: input.request_id,
-    message: input.service_feedback,
-  });
+        await addFeedback({
+          domain,
+          guest_id,
+          request_id: input.request_id,
+          message: input.service_feedback,
+        });
 
-  // 2) Actualiza columna feedback en la tabla de tickets
-  if (domain === 'rb') {
-    await supabase
-      .from('tickets_rb')
-      .update({ feedback: input.service_feedback ?? null, updated_at: nowISO() })
-      .eq('id', input.request_id);
+        if (domain === 'rb') {
+          await supabase
+            .from('tickets_rb')
+            .update({ feedback: input.service_feedback ?? null, updated_at: nowISO() })
+            .eq('id', input.request_id);
 
-    // 3) Línea en el historial (si tu history tiene columna feedback la usamos, si no, usa note)
-    await rbAddHistory({
-      request_id: input.request_id,
-      status: 'FEEDBACK',
-      actor: 'guest',
-      feedback: input.service_feedback,        // <-- si tu tabla history_rb tiene columna feedback
-      // note: input.service_feedback,         // <-- usa esta línea en lugar de "feedback:" si NO existe la columna
-    });
+          await rbAddHistory({
+            request_id: input.request_id,
+            status: 'FEEDBACK',
+            actor: 'guest',
+            feedback: input.service_feedback,
+          });
 
-  } else {
-    await supabase
-      .from('tickets_m')
-      .update({ feedback: input.service_feedback ?? null, updated_at: nowISO() })
-      .eq('id', input.request_id);
+        } else {
+          await supabase
+            .from('tickets_m')
+            .update({ feedback: input.service_feedback ?? null, updated_at: nowISO() })
+            .eq('id', input.request_id);
 
-    await mAddHistory({
-      request_id: input.request_id,
-      status: 'FEEDBACK',
-      actor: 'guest',
-      feedback: input.service_feedback,        // <-- si tu tabla history_m tiene columna feedback
-      // note: input.service_feedback,         // <-- usa esta línea en lugar de "feedback:" si NO existe la columna
-    });
-  }
+          await mAddHistory({
+            request_id: input.request_id,
+            status: 'FEEDBACK',
+            actor: 'guest',
+            feedback: input.service_feedback,
+          });
+        }
 
-  return { status: 'success', data: { request_id: input.request_id, domain, message: 'Feedback guardado' } };
-}
-
+        return { status: 'success', data: { request_id: input.request_id, domain, message: 'Feedback guardado' } };
+      }
 
       const rb = await rbGetTicket(input.request_id);
       if (rb) return await handleRB(rb);
@@ -817,48 +880,84 @@ function askYesNo(question: string): Promise<boolean> {
   });
 }
 
+function envBool(name: string, def = true) {
+  const raw = (process.env[name] ?? '').trim().toLowerCase();
+  if (raw === '') return def; // si no está seteado, usa default
+  return ['1','true','t','yes','y','si','sí','on'].includes(raw);
+}
 
-
+// ===== INIT: postear ./input.json y luego decision interactiva o automática
 // ===== INIT: postear ./input.json y luego decision interactiva o automática
 async function runInitFlow(baseUrl: string) {
   try {
-    const jsonPath = path.resolve(process.env.INIT_JSON_PATH ?? './input.json');
-    if (!fs.existsSync(jsonPath)) {
-      console.log(`INIT: no se encontró ${jsonPath}, se omite init.`);
+    const resolvedPath = path.resolve(process.env.INIT_JSON_PATH ?? './input.json');
+    console.log(`[INIT] CWD: ${process.cwd()}`);
+    console.log(`[INIT] INIT_JSON_PATH (resuelto): ${resolvedPath}`);
+
+    if (!fs.existsSync(resolvedPath)) {
+      console.log(`[INIT] No se encontró archivo en ${resolvedPath}. Se omite INIT.`);
       return;
     }
 
-    const raw = fs.readFileSync(jsonPath, 'utf-8');
-    const inputData = JSON.parse(raw);
+    const raw = fs.readFileSync(resolvedPath, 'utf-8');
+    console.log(`[INIT] input.json bytes=${raw.length}`);
+    console.log(`[INIT] preview: ${raw.slice(0, 200).replace(/\n/g, ' ')}${raw.length > 200 ? '…' : ''}`);
+
+    let parsed = JSON.parse(raw);
+
+    // Soporte flexible: admitir tanto {…} como {"input_data":{…}}
+    const inputData = parsed?.input_data && typeof parsed.input_data === 'object'
+      ? parsed.input_data
+      : parsed;
+
+    if (!inputData || typeof inputData !== 'object') {
+      console.error('[INIT] El JSON no es un objeto válido ni contiene "input_data" objeto.');
+      return;
+    }
+    if (!inputData.action) {
+      console.log('[INIT] action no provisto; se usará "create" por defecto.');
+      inputData.action = 'create';
+    }
 
     const headers: Record<string,string> = { 'Content-Type': 'application/json' };
-    if (process.env.API_KEY_AUTH === 'true' && process.env.VALID_API_KEYS) {
+    if (envBool('API_KEY_AUTH', false) && process.env.VALID_API_KEYS) {
       headers['X-API-Key'] = process.env.VALID_API_KEYS.split(',')[0]!.trim();
     }
 
     // 1) Crear ticket
+    console.log('[INIT] POST /api/execute (create)…');
     const createResp = await fetch(`${baseUrl}/api/execute`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ input_data: inputData }),
     });
-    const createJson = await createResp.json().catch(() => ({}));
-    console.log('INIT create status:', createResp.status, JSON.stringify(createJson));
+    const createText = await createResp.text();
+    let createJson: any = {};
+    try { createJson = JSON.parse(createText); } catch { /* deja el texto crudo para diagnosticar */ }
+    console.log(`[INIT] create status=${createResp.status} body=`, createJson || createText);
 
-    const requestId = createJson?.output_data?.request_id;
+    const requestId =
+      createJson?.output_data?.request_id ||
+      createJson?.data?.request_id ||              // por si el tool responde plano
+      createJson?.request_id;
+
     if (!requestId) {
-      console.error('INIT: no se obtuvo request_id del create. Abortando flujo.');
+      console.error('[INIT] No se obtuvo request_id del create. Abortando flujo.');
       return;
     }
+    console.log(`[INIT] request_id=${requestId}`);
 
     // 2) Decidir (interactivo o automático)
     let decision: 'accept' | 'reject';
-    if ((process.env.INTERACTIVE_DECIDE ?? 'false').toLowerCase() === 'true') {
+    const interactive = envBool('INTERACTIVE_DECIDE', false);
+    const initDecisionRaw = (process.env.INIT_DECISION ?? 'accept').toLowerCase();
+    if (interactive) {
       const yes = await askYesNo(`¿Aceptar pedido ${requestId}?`);
       decision = yes ? 'accept' : 'reject';
     } else {
-      decision = (process.env.INIT_DECISION ?? 'accept').toLowerCase() === 'reject' ? 'reject' : 'accept';
+      decision = initDecisionRaw === 'reject' ? 'reject' : 'accept';
     }
+    console.log(`[INIT] decision=${decision} (interactive=${interactive}, INIT_DECISION="${initDecisionRaw}")`);
 
     const postData: AgentInput = { action: decision, request_id: requestId };
 
@@ -867,10 +966,13 @@ async function runInitFlow(baseUrl: string) {
       headers,
       body: JSON.stringify({ input_data: postData }),
     });
-    const actJson = await actResp.json().catch(() => ({}));
-    console.log(`INIT ${decision} status:`, actResp.status, JSON.stringify(actJson));
+    const actText = await actResp.text();
+    let actJson: any = {};
+    try { actJson = JSON.parse(actText); } catch { /* noop */ }
+    console.log(`[INIT] ${decision} status=${actResp.status} body=`, actJson || actText);
+
   } catch (e:any) {
-    console.error('INIT flow error:', e?.message || e);
+    console.error('[INIT] flow error:', e?.message || e);
   }
 }
 
@@ -887,81 +989,22 @@ async function main(){
     console.log(`Health:  ${baseUrl}/health`);
     console.log(`Execute: ${baseUrl}/api/execute`);
 
-    // 2) Lee input.json y crea ticket
-    const jsonPath = path.resolve('./input.json');
-    if (!fs.existsSync(jsonPath)) {
-      console.log('⚠️ No se encontró input.json, no se creó ticket inicial.');
-      return;
+    // 2) INIT opcional (controlado por ENV, con logs claros)
+    const initOnStart = envBool('INIT_ON_START', true);
+    const initJsonPath = process.env.INIT_JSON_PATH ?? './input.json';
+    const interactive = envBool('INTERACTIVE_DECIDE', false);
+    const initDecisionRaw = (process.env.INIT_DECISION ?? 'accept').toLowerCase();
+
+    console.log(`[INIT] INIT_ON_START=${initOnStart}  (crudo="${process.env.INIT_ON_START ?? '<unset>'}")`);
+    console.log(`[INIT] INIT_JSON_PATH="${initJsonPath}"`);
+    console.log(`[INIT] INTERACTIVE_DECIDE=${interactive}  (crudo="${process.env.INTERACTIVE_DECIDE ?? '<unset>'}")`);
+    console.log(`[INIT] INIT_DECISION="${initDecisionRaw}"`);
+
+    if (initOnStart) {
+      await runInitFlow(baseUrl);
+    } else {
+      console.log('[INIT] Saltado porque INIT_ON_START=false');
     }
-    const raw = fs.readFileSync(jsonPath, 'utf-8');
-    const inputData = JSON.parse(raw);
-
-    const createResp = await fetch(`${baseUrl}/api/execute`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input_data: inputData }),
-    });
-    const createJson = await createResp.json();
-    console.log('INIT create:', createJson);
-
-    const requestId = createJson?.output_data?.request_id;
-    if (!requestId) return console.error('❌ No se obtuvo request_id');
-
-    // 3) Preguntar en terminal [y/n]
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(`¿Aceptar pedido ${requestId}? [y/n]: `, async (answer) => {
-      rl.close();
-      const decision = /^y(es)?$|^s(i|í)?$/i.test(answer.trim()) ? 'accept' : 'reject';
-
-      const actResp = await fetch(`${baseUrl}/api/execute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input_data: { action: decision, request_id: requestId } }),
-      });
-      const actJson = await actResp.json();
-      console.log(`INIT ${decision}:`, actJson);
-
-      // 4) Si se aceptó, preguntar si se completó o cancelar
-        if (decision === 'accept') {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        rl.question(`¿Se completó el pedido ${requestId}? [y/n]: `, async (answer) => {
-            rl.close();
-
-// y/yes/sí -> complete, cualquier otra -> cancel
-const compDecision = /^y(es)?$|^s(i|í)?$/i.test(answer.trim()) ? 'complete' : 'cancel';
-
-const compResp = await fetch(`${baseUrl}/api/execute`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ input_data: { action: compDecision, request_id: requestId } }),
-});
-const actJson2 = await compResp.json();
-console.log(`INIT ${compDecision}:`, actJson2);
-
-// Si se completó, pedir feedback y guardarlo
-if (compDecision === 'complete') {
-  const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
-
-  rl2.question('Comentario (opcional, ENTER para omitir): ', async (comment) => {
-      rl2.close();
-
-      const payload: any = { action: 'feedback', request_id: requestId };
-      if (comment && comment.trim()) payload.service_feedback = comment.trim();
-
-      const fbResp = await fetch(`${baseUrl}/api/execute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input_data: payload }),
-      });
-      const fbJson = await fbResp.json();
-      console.log('FEEDBACK:', fbJson);
-    });
-
-}
-        });
-        }
-
-    });
 
   } catch (e) {
     console.error('Failed to start:', e);
