@@ -288,27 +288,72 @@ async function resolveAndValidateItems(
   rawItems: Array<{id?: string; name: string; qty?: number}>,
   nowStr?: string,
   enableStockCheck: boolean = true
-): Promise<{ items: ResolvedItem[]; total: number; restSet: Set<'rest1'|'rest2'>; }> {
+): Promise<{ 
+  items: ResolvedItem[]; 
+  total: number; 
+  restSet: Set<'rest1'|'rest2'>; 
+  warnings: string[];
+}> {
   const menu = await dbMenuUnion();
   const cur = hhmm(nowStr);
 
   const byId = new Map(menu.map(m => [m.id, m]));
   const byName = new Map(menu.map(m => [normName(m.name), m]));
+  
+  // Búsqueda fuzzy mejorada
+  const findByFuzzyName = (searchName: string): MenuRow | undefined => {
+    const normalized = normName(searchName);
+    
+    // Búsqueda exacta primero
+    let row = byName.get(normalized);
+    if (row) return row;
+    
+    // Búsqueda parcial (contiene)
+    for (const [menuName, menuRow] of byName.entries()) {
+      if (menuName.includes(normalized) || normalized.includes(menuName)) {
+        return menuRow;
+      }
+    }
+    
+    // Búsqueda por palabras clave
+    const keywords = normalized.split(' ');
+    for (const [menuName, menuRow] of byName.entries()) {
+      if (keywords.some(keyword => menuName.includes(keyword) && keyword.length > 2)) {
+        return menuRow;
+      }
+    }
+    
+    return undefined;
+  };
 
   const resolved: ResolvedItem[] = [];
+  const warnings: string[] = [];
 
   for (const it of (rawItems ?? [])) {
-    const row = it.id ? byId.get(it.id) : byName.get(normName(it.name));
-    if (!row) {
-      throw new Error(`No encontrado en menú: ${it.name}`);
+    console.log(`[RESOLVE] Processing item: ${it.name} (qty: ${it.qty || 1})`);
+    
+    let row: MenuRow | undefined;
+    
+    if (it.id) {
+      row = byId.get(it.id);
+    } else {
+      row = findByFuzzyName(it.name);
     }
+
+    if (!row) {
+      const error = `No encontrado en menú: ${it.name}`;
+      console.log(`[RESOLVE] ❌ ${error}`);
+      throw new Error(error);
+    }
+
+    console.log(`[RESOLVE] ✅ Matched "${it.name}" → "${row.name}" (${row.restaurant})`);
 
     const active = row.is_active === true;
     const inTime = isInRange(cur, toHHMM(row.available_start as any), toHHMM(row.available_end as any));
     const stockOK = !enableStockCheck || (row.stock_current > row.stock_minimum);
 
-    if (!active)  throw new Error(`Inactivo: ${row.name}`);
-    if (!inTime)  throw new Error(`Fuera de horario: ${row.name}`);
+    if (!active) throw new Error(`Inactivo: ${row.name}`);
+    if (!inTime) throw new Error(`Fuera de horario: ${row.name}`);
     if (!stockOK) throw new Error(`Sin stock suficiente: ${row.name}`);
 
     const qty = Math.max(1, it.qty ?? 1);
@@ -321,12 +366,16 @@ async function resolveAndValidateItems(
       restaurant: row.restaurant as 'rest1'|'rest2',
       category: row.category as any,
     });
+
+    console.log(`[RESOLVE] ✅ Added: ${qty}x ${row.name} ($${row.price}) from ${row.restaurant}`);
   }
 
   const total = resolved.reduce((acc, r) => acc + r.price * r.qty, 0);
   const restSet = new Set(resolved.map(r => r.restaurant));
 
-  return { items: resolved, total, restSet };
+  console.log(`[RESOLVE] Summary: ${resolved.length} items, total: $${total}, restaurants: [${Array.from(restSet).join(', ')}]`);
+
+  return { items: resolved, total, restSet, warnings };
 }
 
 // Room Service (RB)

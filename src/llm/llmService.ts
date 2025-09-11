@@ -10,16 +10,18 @@ const RequestAnalysisSchema = z.object({
   intent: z.enum(['room_service', 'maintenance', 'inquiry', 'complaint', 'cancellation', 'multi']),
   items: z.array(z.object({
     name: z.string(),
-    quantity: z.number().optional().default(1),
-    category: z.enum(['food', 'beverage', 'dessert']).optional()
+    quantity: z.number().min(1).default(1),
+    category: z.enum(['food', 'beverage', 'dessert']).optional(),
+    restaurant_hint: z.enum(['rest1', 'rest2', 'both']).optional()
   })).optional(),
   restaurant_preference: z.enum(['rest1', 'rest2', 'multi', 'any']).optional(),
-  issue_description: z.string().optional().nullable(), // ← Permitir null
-  severity: z.enum(['low', 'medium', 'high']).optional().nullable(), // ← Permitir null
+  issue_description: z.string().optional().nullable(),
+  severity: z.enum(['low', 'medium', 'high']).optional().nullable(),
   priority: z.enum(['low', 'normal', 'high']).optional(),
-  special_instructions: z.string().optional().nullable(), // ← Permitir null
+  special_instructions: z.string().optional().nullable(),
   urgency: z.boolean().optional(),
-  confidence: z.number().min(0).max(1)
+  confidence: z.number().min(0).max(1),
+  reasoning: z.string().optional() // ← Agregar esta línea
 });
 
 type RequestAnalysis = z.infer<typeof RequestAnalysisSchema>;
@@ -230,69 +232,103 @@ async analyze(prompt: string, context?: any): Promise<RequestAnalysis> {
   const systemPrompt = `Eres un asistente experto en análisis de solicitudes de hotel para Room Service y Mantenimiento.
 
 CONTEXTO DEL HOTEL:
-- Tenemos 2 restaurantes: rest1 (comida internacional) y rest2 (comida local/mexicana)
-- Servicios: room service (comida/bebida) y mantenimiento
+- rest1: Restaurante internacional (hamburguesas, pizzas, pasta, comida occidental)
+- rest2: Restaurante mexicano/local (tacos, tortas, horchata, comida tradicional)
 
-INSTRUCCIONES:
-1. Analiza la solicitud del huésped y determina la intención principal
-2. Extrae ítems específicos con cantidades si es room service
-3. Identifica problemas de mantenimiento con severidad
-4. Sugiere el restaurante más apropiado según el tipo de comida
+INSTRUCCIONES CRÍTICAS:
+1. DETECTA TODOS LOS ÍTEMS mencionados en la solicitud, no solo uno
+2. Asigna cantidad específica a cada ítem
+3. Categoriza correctamente cada ítem (food/beverage/dessert)
+4. Si hay ítems de ambos restaurantes, usar "multi"
 
-Responde SOLO con JSON válido siguiendo este schema:
+EJEMPLOS:
+- "hamburguesa y tacos al pastor y horchata" → 3 ítems separados
+- "dos pizzas y una coca" → pizza cantidad 2, coca cantidad 1
+
+Responde SOLO con JSON válido:
 {
-  "intent": "room_service" | "maintenance" | "inquiry" | "complaint" | "cancellation",
-  "items": [{"name": "string", "quantity": number, "category": "food"|"beverage"|"dessert"}],
+  "intent": "room_service",
+  "items": [{"name": "string", "quantity": number, "category": "food"|"beverage"|"dessert", "restaurant_hint": "rest1"|"rest2"}],
   "restaurant_preference": "rest1" | "rest2" | "multi" | "any",
-  "issue_description": "string",
-  "severity": "low" | "medium" | "high",
-  "priority": "low" | "normal" | "high",
-  "special_instructions": "string",
-  "urgency": boolean,
-  "confidence": number (0-1)
+  "issue_description": null,
+  "severity": null,
+  "priority": "normal",
+  "special_instructions": null,
+  "urgency": false,
+  "confidence": number (0-1),
+  "reasoning": "explicación del análisis"
 }`;
 
   console.log('[GEMINI] Making request to API...');
-  console.log('[GEMINI] API Key present:', !!this.apiKey);
   
-  const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${this.apiKey}`, {
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${this.apiKey}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{
-        parts: [{ text: `${systemPrompt}\n\nSolicitud del huésped: "${prompt}"\nContexto adicional: ${JSON.stringify(context || {})}` }]
+        parts: [{ text: `${systemPrompt}\n\nAnaliza: "${prompt}"\nContexto: ${JSON.stringify(context || {})}` }]
       }],
       generationConfig: {
-        temperature: parseFloat(process.env.LLM_TEMPERATURE || '0.3'),
-        maxOutputTokens: parseInt(process.env.LLM_MAX_TOKENS || '1000'),
+        temperature: parseFloat(process.env.LLM_TEMPERATURE || '0.2'),
+        maxOutputTokens: parseInt(process.env.LLM_MAX_TOKENS || '1500'),
       }
     })
   });
 
-  console.log('[GEMINI] Response status:', geminiResponse.status);
+  const data = await response.json();
+  console.log('[GEMINI] Response data:', JSON.stringify(data, null, 2));
   
-  const geminiData = await geminiResponse.json();
-  console.log('[GEMINI] Response data:', JSON.stringify(geminiData, null, 2));
-  
-  const geminiContent = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
-  console.log('[GEMINI] Extracted content:', geminiContent);
+  const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
+ console.log('[GEMINI] Raw response from API:', content);
 
-  if (!geminiContent) throw new Error('No response from Gemini');
+  if (!content) throw new Error('No response from Gemini');
 
   try {
-
-    const cleanContent = geminiContent.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const cleanContent = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const parsed = JSON.parse(cleanContent);
     return RequestAnalysisSchema.parse(parsed);
   } catch (error) {
     console.warn('Error parsing Gemini response:', error);
-    console.warn('Raw response:', geminiContent);
-    return {
-      intent: 'inquiry',
-      confidence: 0.1,
-      special_instructions: prompt
-    };
+    return this.fallbackAnalysis(prompt);
   }
+}
+
+private fallbackAnalysis(prompt: string): RequestAnalysis {
+  const text = prompt.toLowerCase();
+  const items = [];
+
+  // Detección mejorada de múltiples ítems
+  const itemPatterns = [
+    { pattern: /hamburguesas?/g, name: 'hamburguesa', category: 'food', restaurant: 'rest1' },
+    { pattern: /pizzas?/g, name: 'pizza', category: 'food', restaurant: 'rest1' },
+    { pattern: /tacos?\s*(al\s+pastor)?/g, name: 'tacos al pastor', category: 'food', restaurant: 'rest2' },
+    { pattern: /horchatas?/g, name: 'horchata', category: 'beverage', restaurant: 'rest2' },
+    { pattern: /cocas?|coca\s+colas?/g, name: 'coca cola', category: 'beverage', restaurant: 'rest1' }
+  ];
+
+  for (const itemPattern of itemPatterns) {
+    const matches = Array.from(text.matchAll(itemPattern.pattern));
+    if (matches.length > 0) {
+      items.push({
+        name: itemPattern.name,
+        quantity: 1,
+        category: itemPattern.category as 'food' | 'beverage',
+        restaurant_hint: itemPattern.restaurant as 'rest1' | 'rest2'
+      });
+    }
+  }
+
+  const restaurants = new Set(items.map(item => item.restaurant_hint));
+  const restaurant_preference = restaurants.size > 1 ? 'multi' : 
+                              restaurants.size === 1 ? Array.from(restaurants)[0] : 'any';
+
+  return {
+    intent: items.length > 0 ? 'room_service' : 'inquiry',
+    items: items.length > 0 ? items : undefined,
+    restaurant_preference: restaurant_preference as any,
+    confidence: 0.7,
+    reasoning: `Análisis Gemini mejorado: ${items.length} ítems detectados`
+  };
 }
 
   async generateResponse(prompt: string): Promise<string> {
