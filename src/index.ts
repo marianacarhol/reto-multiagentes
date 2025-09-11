@@ -1,9 +1,21 @@
 /**
  * Agent-03 RoomService & Maintenance Tool (Multi-Restaurant)
- * v2.3.1
+ * v2.3.4
  * - Menú dinámico por restaurante (rest1/rest2) con horarios
  * - Ítems de entrada: sólo name (+qty opcional); precio/stock/horario/restaurant desde BD
  * - Tickets RB/M, feedback y cross-sell
+ * - INIT: al iniciar, lee ./input.json, crea ticket y luego:
+ *     - si INTERACTIVE_DECIDE=true -> pregunta por terminal [y/n]
+ *     - si no, usa INIT_DECISION=accept|reject (default accept)
+ *
+ * ENV:
+ *  - INIT_ON_START=true|false         (default true)
+ *  - INIT_JSON_PATH=./input.json      (ruta al json inicial)
+ *  - INTERACTIVE_DECIDE=true|false    (default false -> usa INIT_DECISION)
+ *  - INIT_DECISION=accept|reject      (default accept)
+ *  - API_KEY_AUTH=true|false
+ *  - VALID_API_KEYS=key1,key2
+ *  - SUPABASE_URL, SUPABASE_SERVICE_ROLE
  */
 
 import 'dotenv/config';
@@ -23,14 +35,14 @@ type ServiceType = 'food' | 'beverage' | 'maintenance';
 type TicketStatus = 'CREADO' | 'ACEPTADA' | 'EN_PROCESO' | 'COMPLETADA' | 'RECHAZADA';
 
 interface AgentInput {
-  action?: 'get_menu' | 'create' | 'status' | 'complete' | 'assign' | 'feedback' | 'confirm_service';
+  action?: 'get_menu' | 'create' | 'status' | 'complete' | 'assign' | 'feedback' | 'confirm_service' | 'accept' | 'reject';
 
   // Identidad básica
-  guest_id: string;
-  room: string;
+  guest_id?: string;
+  room?: string;
 
   // Room Service
-  restaurant?: 'rest1' | 'rest2' | 'multi'; // acepta 'multi'; si se omite se infiere por ítems
+  restaurant?: 'rest1' | 'rest2' | 'multi';
   type?: ServiceType;
   items?: Array<{ id?: string; name: string; qty?: number }>;
 
@@ -72,13 +84,12 @@ interface AgentConfig {
   enable_cross_sell?: boolean;
   cross_sell_threshold?: number;
 
-  // opciones de cross-sell por categoría
-  cross_sell_per_category?: boolean;          // compat (no se usa si false)
-  cross_sell_per_category_count?: number;     // 1..3 (default 1)
-  cross_sell_prefer_opposite?: boolean;       // prioriza opuesto SOLO si el ticket no es multi
+  cross_sell_per_category?: boolean;
+  cross_sell_per_category_count?: number;     // 1..3
+  cross_sell_prefer_opposite?: boolean;
 
-  api_key?: string;       // compat
-  default_count?: number; // compat
+  api_key?: string;
+  default_count?: number;
 }
 
 const supabase = createClient(
@@ -86,19 +97,15 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE ?? ''
 );
 
-// ============ Utils ============
+// ===== Utils
 const nowISO = () => new Date().toISOString();
 const pad2 = (n: number) => String(n).padStart(2, '0');
-
 const hhmm = (nowStr?: string) => {
   const d = nowStr ? new Date(nowStr) : new Date();
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 };
-
-const isInRange = (cur: string, start: string, end: string) => {
-  // soporta rangos que cruzan medianoche
-  return start <= end ? (cur >= start && cur <= end) : (cur >= start || cur <= end);
-};
+const isInRange = (cur: string, start: string, end: string) =>
+  start <= end ? (cur >= start && cur <= end) : (cur >= start || cur <= end);
 
 const classify = (text?: string, items?: Array<{name:string}>, explicit?: ServiceType): ServiceType => {
   if (explicit) return explicit;
@@ -109,10 +116,8 @@ const classify = (text?: string, items?: Array<{name:string}>, explicit?: Servic
     return 'beverage';
   return 'food';
 };
-
 const mapArea = (type: ServiceType) =>
   type === 'maintenance' ? 'maintenance' : type === 'beverage' ? 'bar' : 'kitchen';
-
 const withinWindow = (
   nowStr: string | undefined,
   window: {start:string; end:string} | undefined,
@@ -126,9 +131,14 @@ const withinWindow = (
   return isInRange(hhmm(nowStr), start, end);
 };
 
-// ============ DB helpers ============
+function toHHMM(s: string) { return s.toString().slice(0,5); }
+function normName(s?: string){
+  return (s ?? '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase().trim().replace(/\s+/g,' ');
+}
 
-// guests (opcional para gastar)
+// ===== DB helpers
 async function dbGetGuestSpendLimit(guest_id: string){
   const { data, error } = await supabase.from('guests')
     .select('spend_limit')
@@ -138,7 +148,6 @@ async function dbGetGuestSpendLimit(guest_id: string){
   return data?.spend_limit as number | null | undefined;
 }
 
-// menú: vista unificada
 type MenuRow = {
   restaurant: 'rest1'|'rest2';
   id: string;
@@ -150,7 +159,7 @@ type MenuRow = {
   stock_current: number;
   stock_minimum: number;
   is_active: boolean;
-  cross_sell_items?: string[]; // opcional
+  cross_sell_items?: string[];
 };
 
 async function dbMenuUnion(): Promise<MenuRow[]> {
@@ -159,17 +168,7 @@ async function dbMenuUnion(): Promise<MenuRow[]> {
   return (data ?? []) as any;
 }
 
-// ------- Resolver de ítems desde BD (precio/horario/stock/restaurante) -------
-function toHHMM(s: string) {
-  return s.toString().slice(0,5);
-}
-
-function normName(s?: string){
-  return (s ?? '')
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .toLowerCase().trim().replace(/\s+/g,' ');
-}
-
+// ------- Resolver & validar ítems desde BD --------
 type ResolvedItem = {
   id: string;
   name: string;
@@ -194,9 +193,7 @@ async function resolveAndValidateItems(
 
   for (const it of (rawItems ?? [])) {
     const row = it.id ? byId.get(it.id) : byName.get(normName(it.name));
-    if (!row) {
-      throw new Error(`No encontrado en menú: ${it.name}`);
-    }
+    if (!row) throw new Error(`No encontrado en menú: ${it.name}`);
 
     const active = row.is_active === true;
     const inTime = isInRange(cur, toHHMM(row.available_start as any), toHHMM(row.available_end as any));
@@ -220,57 +217,33 @@ async function resolveAndValidateItems(
 
   const total = resolved.reduce((acc, r) => acc + r.price * r.qty, 0);
   const restSet = new Set(resolved.map(r => r.restaurant));
-
   return { items: resolved, total, restSet };
 }
 
-// Room Service (RB)
+// ===== RB / M
 async function rbCreateTicket(row: {
   id: string; guest_id: string; room: string; restaurant: 'rest1'|'rest2'|'multi';
   status: TicketStatus; priority: string; items: any; total_amount: number; notes?: string;
-}){
-  const { error } = await supabase.from('tickets_rb').insert(row);
-  if (error) throw error;
-}
+}){ const { error } = await supabase.from('tickets_rb').insert(row); if (error) throw error; }
 async function rbUpdateTicket(id: string, patch: Partial<{status: TicketStatus; priority:string; notes:string}>){
-  const { error } = await supabase.from('tickets_rb')
-    .update({ ...patch, updated_at: nowISO() }).eq('id', id);
+  const { error } = await supabase.from('tickets_rb').update({ ...patch, updated_at: nowISO() }).eq('id', id);
   if (error) throw error;
 }
-async function rbGetTicket(id: string){
-  const { data, error } = await supabase.from('tickets_rb').select('*').eq('id', id).maybeSingle();
-  if (error) throw error;
-  return data as any | null;
-}
-async function rbAddHistory(h: {request_id: string; status: string; actor: string; note?: string}){
-  const { error } = await supabase.from('ticket_history_rb').insert({ ...h, ts: nowISO() });
-  if (error) throw error;
-}
+async function rbGetTicket(id: string){ const { data, error } = await supabase.from('tickets_rb').select('*').eq('id', id).maybeSingle(); if (error) throw error; return data as any | null; }
+async function rbAddHistory(h: {request_id: string; status: string; actor: string; note?: string}){ const { error } = await supabase.from('ticket_history_rb').insert({ ...h, ts: nowISO() }); if (error) throw error; }
 
-// Mantenimiento (M)
 async function mCreateTicket(row: {
   id: string; guest_id: string; room: string; issue: string; severity?: string;
   status: TicketStatus; priority: string; notes?: string;
-}){
-  const { error } = await supabase.from('tickets_m').insert(row);
-  if (error) throw error;
-}
+}){ const { error } = await supabase.from('tickets_m').insert(row); if (error) throw error; }
 async function mUpdateTicket(id: string, patch: Partial<{status: TicketStatus; priority:string; notes:string}>){
-  const { error } = await supabase.from('tickets_m')
-    .update({ ...patch, updated_at: nowISO() }).eq('id', id);
+  const { error } = await supabase.from('tickets_m').update({ ...patch, updated_at: nowISO() }).eq('id', id);
   if (error) throw error;
 }
-async function mGetTicket(id: string){
-  const { data, error } = await supabase.from('tickets_m').select('*').eq('id', id).maybeSingle();
-  if (error) throw error;
-  return data as any | null;
-}
-async function mAddHistory(h: {request_id: string; status: string; actor: string; note?: string}){
-  const { error } = await supabase.from('ticket_history_m').insert({ ...h, ts: nowISO() });
-  if (error) throw error;
-}
+async function mGetTicket(id: string){ const { data, error } = await supabase.from('tickets_m').select('*').eq('id', id).maybeSingle(); if (error) throw error; return data as any | null; }
+async function mAddHistory(h: {request_id: string; status: string; actor: string; note?: string}){ const { error } = await supabase.from('ticket_history_m').insert({ ...h, ts: nowISO() }); if (error) throw error; }
 
-// Feedback (usa tu tabla con request_id)
+// Feedback
 async function addFeedback(rec: {
   domain: 'rb'|'m';
   guest_id: string;
@@ -289,46 +262,22 @@ async function addFeedback(rec: {
   if (error) throw error;
 }
 
-// Descontar stock al crear RB
+// Descontar stock
 async function decrementStock(items: Array<{id?:string; name:string; restaurant?:'rest1'|'rest2'; qty?:number}>){
   if (!items?.length) return;
   const menu = await dbMenuUnion();
   for (const it of items) {
-    const row = it.id
-      ? menu.find(m => m.id === it.id)
-      : menu.find(m => m.name.toLowerCase() === it.name.toLowerCase());
+    const row = it.id ? menu.find(m => m.id === it.id) : menu.find(m => m.name.toLowerCase() === it.name.toLowerCase());
     if (!row) continue;
-
     const table = row.restaurant === 'rest1' ? 'rest1_menu_items' : 'rest2_menu_items';
     const qty = Math.max(1, it.qty ?? 1);
     const newStock = Math.max(0, (row.stock_current ?? 0) - qty);
-
-    const { error } = await supabase
-      .from(table)
-      .update({ stock_current: newStock, updated_at: nowISO() })
-      .eq('id', row.id);
-
+    const { error } = await supabase.from(table).update({ stock_current: newStock, updated_at: nowISO() }).eq('id', row.id);
     if (error) throw error;
   }
 }
 
-// Registrar consumo (opcional). Si la tabla no existe, se ignora.
-async function addDailySpend(guest_id: string, amount: number){
-  try {
-    const { error } = await supabase.from('spend_ledger').insert({
-      guest_id,
-      amount,
-      occurred_at: nowISO(),
-    });
-    if (error) {
-      console.warn('spend_ledger insert skipped:', error.message);
-    }
-  } catch (e:any) {
-    console.warn('spend_ledger insert skipped:', e?.message || e);
-  }
-}
-
-// Helpers de cross-sell
+// Cross-sell
 function pickCrossSellByCategory(
   menu: MenuRow[],
   chosen: Array<{id?:string; name:string; restaurant?:'rest1'|'rest2'}>,
@@ -340,29 +289,21 @@ function pickCrossSellByCategory(
     forbidSameCategoryIfPresent?: boolean;
   }
 ){
+  const norm = (s?: string) => (s ?? '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase().trim().replace(/\s+/g,' ');
+
   const chosenIds = new Set(chosen.map(c => c.id).filter(Boolean) as string[]);
-  const chosenNames = new Set(chosen.map(c => normName(c.name)));
+  const chosenNames = new Set(chosen.map(c => norm(c.name)));
 
-  // Mapear items elegidos a filas del menú
-  const byName = new Map(menu.map(m => [normName(m.name), m]));
-  const chosenRows: MenuRow[] = chosen.map(it => {
-    if (it.id) return menu.find(m => m.id === it.id);
-    const nn = normName(it.name);
-    return byName.get(nn);
-  }).filter(Boolean) as MenuRow[];
+  const byName = new Map(menu.map(m => [norm(m.name), m]));
+  const chosenRows: MenuRow[] = chosen.map(it => it.id ? menu.find(m => m.id === it.id) : byName.get(norm(it.name))).filter(Boolean) as MenuRow[];
 
-  // Categorías ya elegidas
-  const chosenCats = new Set<'food'|'beverage'|'dessert'>(
-    chosenRows.map(r => r.category) as any
-  );
-
+  const chosenCats = new Set<'food'|'beverage'|'dessert'>(chosenRows.map(r => r.category) as any);
   if (opts.explicitType === 'food' || opts.explicitType === 'beverage') {
-    if (!chosenCats.has(opts.explicitType)) {
-      chosenCats.add(opts.explicitType);
-    }
+    if (!chosenCats.has(opts.explicitType)) chosenCats.add(opts.explicitType);
   }
 
-  // Determinar categorías faltantes
   const allCats = ['food','beverage','dessert'] as const;
   const targetCats: Array<'food'|'beverage'|'dessert'> = [];
   for (const cat of allCats) {
@@ -371,20 +312,16 @@ function pickCrossSellByCategory(
   }
   if (targetCats.length === 0) return [];
 
-  // Pool disponible
   const available = menu.filter(r =>
-    r.is_active &&
-    r.stock_current > r.stock_minimum &&
+    r.is_active && r.stock_current > r.stock_minimum &&
     isInRange(opts.nowHHMM, (r.available_start as any).toString().slice(0,5), (r.available_end as any).toString().slice(0,5)) &&
-    !chosenIds.has(r.id) &&
-    !chosenNames.has(normName(r.name))
+    !chosenIds.has(r.id) && !chosenNames.has(norm(r.name))
   );
 
   const byCat = new Map<'food'|'beverage'|'dessert', MenuRow[]>();
   for (const c of allCats) byCat.set(c, []);
   for (const r of available) byCat.get(r.category as any)!.push(r);
 
-  // Priorizar restaurante opuesto si se pide (y solo cuando el ticket no es multi)
   if (opts.preferOppositeOf) {
     for (const cat of allCats) {
       const arr = byCat.get(cat)!;
@@ -396,7 +333,6 @@ function pickCrossSellByCategory(
     }
   }
 
-  // Random simple por categoría faltante (shuffle + slice)
   const picks: any[] = [];
   for (const cat of targetCats) {
     const pool = byCat.get(cat) ?? [];
@@ -406,19 +342,16 @@ function pickCrossSellByCategory(
       [pool[i], pool[j]] = [pool[j], pool[i]];
     }
     const count = Math.max(1, Math.min(3, opts.perCategoryCount));
-    for (const r of pool.slice(0, count)) {
-      picks.push({ restaurant: r.restaurant, id: r.id, name: r.name, price: r.price, category: r.category });
-    }
+    for (const r of pool.slice(0, count)) picks.push({ restaurant: r.restaurant, id: r.id, name: r.name, price: r.price, category: r.category });
   }
-
   return picks;
 }
 
-// ============ Tool ============
-const tool = ({
+// ===== Tool (execute con 3 parámetros)
+const tool = createTool<AgentInput, AgentConfig>({
   metadata: {
     name: 'agent-03-roomservice-maintenance-split',
-    version: '2.3.1',
+    version: '2.3.4',
     description: 'Room Service (rest1/rest2) + Maintenance con tablas separadas y cross-sell inter-restaurantes (multi-enabled)',
     capabilities: ['dynamic-menu','intelligent-cross-sell','ticket-tracking','feedback','policy-check'],
     author: 'Equipo A3',
@@ -427,21 +360,17 @@ const tool = ({
 
   schema: {
     input: {
-      action: { type: 'string', enum: ['get_menu','create','status','complete','assign','feedback','confirm_service', 'accept', 'reject'], required: false, default: 'create' },
-      guest_id: stringField({ required: true }),
-      room: stringField({ required: true }),
+      action: { type: 'string', enum: ['get_menu','create','status','complete','assign','feedback','confirm_service','accept','reject'], required: false, default: 'create' },
+      guest_id: stringField({ required: false }),
+      room: stringField({ required: false }),
 
-      restaurant: { type: 'string', required: false, enum: ['rest1','rest2','multi'] }, // acepta multi
+      restaurant: { type: 'string', required: false, enum: ['rest1','rest2','multi'] },
       type: { type: 'string', required: false, enum: ['food','beverage','maintenance'] },
-      items: {
-        type: 'array', required: false, items: {
-          type: 'object', properties: {
-            id: stringField({ required: false }),          // opcional
-            name: stringField({ required: true }),         // requerido
-            qty: numberField({ required: false, default: 1, min: 1 }), // cantidad
-          }
-        }
-      },
+      items: { type: 'array', required: false, items: { type: 'object', properties: {
+        id: stringField({ required: false }),
+        name: stringField({ required: true }),
+        qty: numberField({ required: false, default: 1, min: 1 }),
+      } }},
 
       issue: stringField({ required: false }),
       severity: { type: 'string', required: false, enum: ['low','medium','high'] },
@@ -452,20 +381,16 @@ const tool = ({
 
       now: stringField({ required: false }),
       do_not_disturb: booleanField({ required: false }),
-      guest_profile: {
-        type: 'object', required: false, properties: {
-          tier: { type: 'string', required: false, enum: ['standard','gold','platinum'] },
-          daily_spend: numberField({ required: false, min: 0 }),
-          spend_limit: numberField({ required: false, min: 0 }),
-          preferences: { type: 'array', required: false, items: { type: 'string' } }
-        }
-      },
-      access_window: {
-        type: 'object', required: false, properties: {
-          start: stringField({ required: true }),
-          end: stringField({ required: true }),
-        }
-      },
+      guest_profile: { type: 'object', required: false, properties: {
+        tier: { type: 'string', required: false, enum: ['standard','gold','platinum'] },
+        daily_spend: numberField({ required: false, min: 0 }),
+        spend_limit: numberField({ required: false, min: 0 }),
+        preferences: { type: 'array', required: false, items: { type: 'string' } }
+      }},
+      access_window: { type: 'object', required: false, properties: {
+        start: stringField({ required: true }),
+        end: stringField({ required: true }),
+      }},
 
       request_id: stringField({ required: false }),
       service_rating: numberField({ required: false, min: 1, max: 5 }),
@@ -489,304 +414,300 @@ const tool = ({
     },
   },
 
-async execute(input: AgentInput, config: any): Promise<ToolExecutionResult> {
-  const { action = 'create', guest_id, room } = input;
+  async execute(input, config, _context): Promise<ToolExecutionResult> {
+    const { action = 'create', guest_id, room } = input;
 
-  // ---- Validación básica
-  if (action === 'create' && (!guest_id || !room || typeof guest_id !== 'string' || typeof room !== 'string')) {
-  return { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'guest_id y room son requeridos (string) para crear ticket' } };
-}
-
-
-  try {
-    const nowHHMM = hhmm(input.now);
-
-    // ---- GET MENU (solo RB)
-    if (action === 'get_menu') {
-      const menu = await dbMenuUnion();
-      const filtered = menu.filter(m =>
-        (!input.menu_category || m.category === input.menu_category) &&
-        m.is_active &&
-        (!config.enable_stock_check || m.stock_current > m.stock_minimum) &&
-        isInRange(nowHHMM, m.available_start.toString().slice(0,5), m.available_end.toString().slice(0,5))
-      );
-      return {
-        status: 'success',
-        data: {
-          current_time: nowHHMM,
-          items: filtered.map(m => ({
-            restaurant: m.restaurant,
-            id: m.id,
-            name: m.name,
-            price: m.price,
-            category: m.category,
-            available_start: m.available_start,
-            available_end: m.available_end,
-            stock_current: m.stock_current
-          }))
-        }
-      };
+    // Validación mínima al crear
+    if (action === 'create') {
+      if (!guest_id || !room || typeof guest_id !== 'string' || typeof room !== 'string') {
+        return { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'guest_id y room son requeridos (string) para crear ticket' } };
+      }
     }
 
-    // ---- Determinar tipo y área
-    const type = classify(input.text, input.items, input.type);
-    const area = mapArea(type);
+    try {
+      const nowHHMM = hhmm(input.now);
 
-    // ---- CREAR TICKET
-    if (action === 'create') {
-      // ---- Room Service
-      if (type === 'food' || type === 'beverage') {
-        const okWindow = withinWindow(input.now, input.access_window, { start: config.accessWindowStart, end: config.accessWindowEnd }, input.do_not_disturb);
-        if (!okWindow) {
-          return { status: 'error', error: { code: 'ACCESS_WINDOW_BLOCK', message: 'Fuera de ventana o DND activo' } };
-        }
-
-        const rawItems = input.items ?? [];
-        if (!input.restaurant && rawItems.length === 0) {
-          return { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'Provee al menos un ítem' } };
-        }
-
-        let resolved: ResolvedItem[] = [];
-        let total = 0;
-        let restSet = new Set<'rest1'|'rest2'>();
-        try {
-          const res = await resolveAndValidateItems(rawItems, input.now, config.enable_stock_check !== false);
-          resolved = res.items;
-          total = res.total;
-          restSet = res.restSet;
-        } catch (e:any) {
-          return { status: 'error', error: { code: 'ITEMS_UNAVAILABLE', message: String(e?.message || e) } };
-        }
-
-        // ---- Límite de gasto
-        let spendLimit = input.guest_profile?.spend_limit ?? await dbGetGuestSpendLimit(guest_id);
-        const dailySpend = input.guest_profile?.daily_spend ?? 0;
-        if (spendLimit != null && (dailySpend + total) > spendLimit) {
-          return { status: 'error', error: { code: 'SPEND_LIMIT', message: 'Límite de gasto excedido' } };
-        }
-
-        // ---- Determinar restaurante
-        const anchor = (input.restaurant === 'rest1' || input.restaurant === 'rest2') ? input.restaurant : undefined;
-        const ticketRestaurant: 'rest1'|'rest2'|'multi' =
-          input.restaurant === 'multi' ? 'multi'
-          : restSet.size > 1 ? 'multi'
-          : restSet.size === 1 ? Array.from(restSet)[0] as ('rest1'|'rest2')
-          : anchor ?? 'multi';
-
-        // ---- Crear ticket en estado CREADO
-        const id = `REQ-${Date.now()}`;
-        await rbCreateTicket({
-          id,
-          guest_id,
-          room,
-          restaurant: ticketRestaurant,
-          status: 'CREADO',
-          priority: input.priority ?? 'normal',
-          items: resolved,
-          total_amount: total,
-          notes: input.notes ?? undefined
-        });
-        await rbAddHistory({ request_id: id, status: 'CREADO', actor: 'system' });
-
+      // GET MENU
+      if (action === 'get_menu') {
+        const menu = await dbMenuUnion();
+        const filtered = menu.filter(m =>
+          (!input.menu_category || m.category === input.menu_category) &&
+          m.is_active &&
+          (config.enable_stock_check !== false ? (m.stock_current > m.stock_minimum) : true) &&
+          isInRange(nowHHMM, m.available_start.toString().slice(0,5), m.available_end.toString().slice(0,5))
+        );
         return {
           status: 'success',
           data: {
-            request_id: id,
-            domain: 'rb',
-            type,
-            area,
-            status: 'CREADO',
-            message: 'Ticket creado. Usa action "accept" o "reject" para procesarlo.'
+            current_time: nowHHMM,
+            items: filtered.map(m => ({
+              restaurant: m.restaurant,
+              id: m.id,
+              name: m.name,
+              price: m.price,
+              category: m.category,
+              available_start: m.available_start,
+              available_end: m.available_end,
+              stock_current: m.stock_current
+            }))
           }
         };
       }
 
-      // ---- Mantenimiento
-      if (!input.issue) {
-        return { status: 'error', error: { code: 'MISSING_ISSUE', message: 'Describe el issue de mantenimiento' } };
-      }
+      const type = classify(input.text, input.items, input.type);
+      const area = mapArea(type);
 
-      const computedPriority = input.severity === 'high' ? 'high' : input.priority ?? 'normal';
-      const id = `REQ-${Date.now()}`;
-      await mCreateTicket({
-        id,
-        guest_id,
-        room,
-        issue: input.issue,
-        severity: input.severity,
-        status: 'CREADO',
-        priority: computedPriority,
-        notes: input.notes ?? undefined
-      });
-      await mAddHistory({ request_id: id, status: 'CREADO', actor: 'system' });
+      // CREATE
+      if (action === 'create') {
+        if (type === 'food' || type === 'beverage') {
+          const okWindow = withinWindow(input.now, input.access_window, { start: config.accessWindowStart, end: config.accessWindowEnd }, input.do_not_disturb);
+          if (!okWindow) return { status: 'error', error: { code: 'ACCESS_WINDOW_BLOCK', message: 'Fuera de ventana o DND activo' } };
 
-      return { 
-        status: 'success', 
-        data: { 
-          request_id: id, 
-          domain: 'm', 
-          type, 
-          area, 
-          status: 'CREADO', 
-          message: 'Ticket creado. Usa action "accept" o "reject" para procesarlo.' 
-        } 
-      };
-    }
+          const rawItems = input.items ?? [];
+          if (!input.restaurant && rawItems.length === 0) {
+            return { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'Provee al menos un ítem' } };
+          }
 
-    // ---- ACCIONES POSTERIORES (accept/reject/status/complete)
-    if (!input.request_id) {
-      return { status: 'error', error: { code: 'MISSING_REQUEST_ID', message: 'request_id es requerido' } };
-    }
-    
-async function handleRB(input: AgentInput, ticket: any) {
-  let newStatus: TicketStatus = ticket.status;
+          let resolved: ResolvedItem[] = [];
+          let total = 0;
+          let restSet = new Set<'rest1'|'rest2'>();
+          try {
+            const res = await resolveAndValidateItems(rawItems, input.now, config.enable_stock_check !== false);
+            resolved = res.items; total = res.total; restSet = res.restSet;
+          } catch (e:any) {
+            return { status: 'error', error: { code: 'ITEMS_UNAVAILABLE', message: String(e?.message || e) } };
+          }
 
-  if (input.action === 'accept') newStatus = 'ACEPTADA';
-  else if (input.action === 'reject') newStatus = 'RECHAZADA';
-  else if (input.action === 'complete') newStatus = 'COMPLETADA';
-  else if (input.action === 'status') {
-    // sólo devolver estado actual
-    return { status: 'success', data: { request_id: ticket.id, status: ticket.status } };
-  }
+          let spendLimit = input.guest_profile?.spend_limit ?? (guest_id ? await dbGetGuestSpendLimit(guest_id) : null);
+          const dailySpend = input.guest_profile?.daily_spend ?? 0;
+          if (spendLimit != null && (dailySpend + total) > spendLimit) {
+            return { status: 'error', error: { code: 'SPEND_LIMIT', message: 'Límite de gasto excedido' } };
+          }
 
-  // ✅ usar id (no request_id) y tocar updated_at
-  const { error } = await supabase
-    .from('tickets_rb')
-    .update({ status: newStatus, updated_at: nowISO() })
-    .eq('id', ticket.id);
+          const anchor = (input.restaurant === 'rest1' || input.restaurant === 'rest2') ? input.restaurant : undefined;
+          const ticketRestaurant: 'rest1'|'rest2'|'multi' =
+            input.restaurant === 'multi' ? 'multi'
+            : restSet.size > 1 ? 'multi'
+            : restSet.size === 1 ? Array.from(restSet)[0] as ('rest1'|'rest2')
+            : anchor ?? 'multi';
 
-  if (error) throw error;
+          const id = `REQ-${Date.now()}`;
+          // en CREATE (RB) guardas 'resolved' que viene de resolveAndValidateItems:
+          await rbCreateTicket({
+            id,
+            guest_id: guest_id!,
+            room: room!,
+            restaurant: ticketRestaurant,
+            status: 'CREADO',
+            priority: input.priority ?? 'normal',
+            items: resolved,              // ← debe incluir: id, name, qty, price, restaurant, category
+            total_amount: total,
+            notes: input.notes ?? undefined
+          });
 
-  await rbAddHistory({
-    request_id: ticket.id,
-    status: newStatus,
-    actor: 'agent',
-    note: input.notes
-  });
+          await rbAddHistory({ request_id: id, status: 'CREADO', actor: 'system' });
 
-  return { status: 'success', data: { request_id: ticket.id, status: newStatus } };
-}
-
-async function handleM(input: AgentInput, ticket: any) {
-  let newStatus: TicketStatus = ticket.status;
-
-  if (input.action === 'accept') newStatus = 'ACEPTADA';
-  else if (input.action === 'reject') newStatus = 'RECHAZADA';
-  else if (input.action === 'complete') newStatus = 'COMPLETADA';
-  else if (input.action === 'status') {
-    return { status: 'success', data: { request_id: ticket.id, status: ticket.status } };
-  }
-
-  const { error } = await supabase
-    .from('tickets_m')
-    .update({ status: newStatus, updated_at: nowISO() })
-    .eq('id', ticket.id);
-
-  if (error) throw error;
-
-  await mAddHistory({
-    request_id: ticket.id,
-    status: newStatus,
-    actor: 'agent',
-    note: input.notes
-  });
-
-  return { status: 'success', data: { request_id: ticket.id, status: newStatus } };
-}
-
-    // --- Intentar Room Service
-    const rb = await rbGetTicket(input.request_id);
-    if (rb) return await handleRB(input, rb);
-
-    // --- Intentar Mantenimiento
-    const mt = await mGetTicket(input.request_id);
-    if (mt) return await handleM(input, mt);
-
-    return { status: 'error', error: { code: 'NOT_FOUND', message: 'request_id no existe ni en RB ni en M' } };
-
-  } catch (e: any) {
-    console.error('ERROR:', e?.message || e);
-    return { status: 'error', error: { code: 'INTERNAL_DB_ERROR', message: String(e?.message || e) } };
-  }
-},
-
-
-  async start(config: any) {
-    console.log(`Servidor arrancado en puerto ${config.port}`);
-  }
-});
-
-async function interactiveTicketLoop() {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
-
-  const askAction = () => {
-    rl.question('Ingresa acción (accept/reject) o "exit" para salir: ', async (action) => {
-      if (action === 'exit') {
-        rl.close();
-        console.log('Saliendo del loop interactivo...');
-        return;
-      }
-
-      rl.question('Ingresa request_id del ticket: ', async (request_id) => {
-        const input: AgentInput = {
-          action: action as any, // 'accept' | 'reject'
-          request_id,
-          actor: 'staff01' // opcional
-        };
-
-        try {
-          const result = await tool.execute(input, {});
-          console.log('Resultado:', result);
-        } catch (e:any) {
-          console.error('Error ejecutando acción:', e?.message || e);
+          return { status: 'success', data: { request_id: id, domain: 'rb', type, area, status: 'CREADO', message: 'Ticket creado. Usa action "accept" o "reject".' } };
         }
 
-        askAction(); // vuelve a preguntar
-      });
-    });
-  };
+        // maintenance
+        if (!input.issue) return { status: 'error', error: { code: 'MISSING_ISSUE', message: 'Describe el issue de mantenimiento' } };
 
-  console.log('=== Ticket Loop interactivo iniciado ===');
-  askAction();
+        const computedPriority = input.severity === 'high' ? 'high' : input.priority ?? 'normal';
+        const id = `REQ-${Date.now()}`;
+        await mCreateTicket({ id, guest_id: guest_id!, room: room!, issue: input.issue, severity: input.severity, status: 'CREADO', priority: computedPriority, notes: input.notes ?? undefined });
+        await mAddHistory({ request_id: id, status: 'CREADO', actor: 'system' });
+
+        return { status: 'success', data: { request_id: id, domain: 'm', type, area, status: 'CREADO', message: 'Ticket creado. Usa action "accept" o "reject".' } };
+      }
+
+      // POST-actions
+      if (!input.request_id) return { status: 'error', error: { code: 'MISSING_REQUEST_ID', message: 'request_id es requerido' } };
+
+      async function handleRB(ticket: any) {
+        let newStatus: TicketStatus = ticket.status;
+
+        if (action === 'accept') newStatus = 'ACEPTADA';
+        else if (action === 'reject') newStatus = 'RECHAZADA';
+        else if (action === 'complete') newStatus = 'COMPLETADA';
+        else if (action === 'status') {
+          return { status: 'success', data: { request_id: ticket.id, status: ticket.status } };
+        }
+
+        // Actualiza estado del ticket
+        const { error } = await supabase
+          .from('tickets_rb')
+          .update({ status: newStatus, updated_at: nowISO() })
+          .eq('id', ticket.id);
+        if (error) throw error;
+
+        // Historial de la decisión
+        await rbAddHistory({ request_id: ticket.id, status: newStatus, actor: 'agent', note: input.notes });
+
+        // Si se aceptó: bajar stock + ping por restaurante
+        if (action === 'accept') {
+          try {
+            // ticket.items viene del create (ResolvedItem[]). Mantén ese shape al guardar.
+            await decrementStock(ticket.items || []);
+
+            // “ping” a cada restaurante involucrado (si items tienen restaurant)
+            const restSet = new Set<string>((ticket.items || []).map((i: any) => i.restaurant).filter(Boolean));
+            for (const r of restSet) {
+              await rbAddHistory({ request_id: ticket.id, status: 'ACEPTADA', actor: r });
+            }
+          } catch (e:any) {
+            // deja constancia si falló el stock
+            await rbAddHistory({ request_id: ticket.id, status: newStatus, actor: 'system', note: `Stock update failed: ${e?.message || e}` });
+          }
+        }
+
+        return { status: 'success', data: { request_id: ticket.id, status: newStatus } };
+      }
+
+      async function handleM(ticket: any) {
+        let newStatus: TicketStatus = ticket.status;
+        if (action === 'accept') newStatus = 'ACEPTADA';
+        else if (action === 'reject') newStatus = 'RECHAZADA';
+        else if (action === 'complete') newStatus = 'COMPLETADA';
+        else if (action === 'status') return { status: 'success', data: { request_id: ticket.id, status: ticket.status } };
+
+        const { error } = await supabase.from('tickets_m').update({ status: newStatus, updated_at: nowISO() }).eq('id', ticket.id);
+        if (error) throw error;
+        await mAddHistory({ request_id: ticket.id, status: newStatus, actor: 'agent', note: input.notes });
+        return { status: 'success', data: { request_id: ticket.id, status: newStatus } };
+      }
+
+      const rb = await rbGetTicket(input.request_id);
+      if (rb) return await handleRB(rb);
+      const mt = await mGetTicket(input.request_id);
+      if (mt) return await handleM(mt);
+      return { status: 'error', error: { code: 'NOT_FOUND', message: 'request_id no existe ni en RB ni en M' } };
+
+    } catch (e: any) {
+      console.error('ERROR:', e?.message || e);
+      return { status: 'error', error: { code: 'INTERNAL_DB_ERROR', message: String(e?.message || e) } };
+    }
+  },
+});
+
+// ===== Helpers CLI
+function askYesNo(question: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(`${question} [y/n]: `, (answer) => {
+      rl.close();
+      const a = (answer || '').trim().toLowerCase();
+      resolve(a === 'y' || a === 'yes' || a === 's' || a === 'si' || a === 'sí');
+    });
+  });
 }
 
-// ============ Server bootstrap ============
-async function main(){
-  try{
-    // 1️⃣ Leer JSON de ticket
-    const jsonPath = path.resolve('./input.json');
-    if (fs.existsSync(jsonPath)) {
-      const raw = fs.readFileSync(jsonPath, 'utf-8');
-      const inputData = JSON.parse(raw) as AgentInput;
-
-      console.log('🔹 Creando ticket desde input.json...');
-      const result = await tool.execute(inputData, {});
-      console.log('✅ Ticket creado:', result);
-      await interactiveTicketLoop();
-
-    } else {
-      console.log('No se encontró ticket.json, se salta creación automática.');
+// ===== INIT: postear ./input.json y luego decision interactiva o automática
+async function runInitFlow(baseUrl: string) {
+  try {
+    const jsonPath = path.resolve(process.env.INIT_JSON_PATH ?? './input.json');
+    if (!fs.existsSync(jsonPath)) {
+      console.log(`INIT: no se encontró ${jsonPath}, se omite init.`);
+      return;
     }
 
-    await tool.start({
-      port: process.env.PORT ? parseInt(process.env.PORT,10) : 3000,
-      host: process.env.HOST || '0.0.0.0',
-      development: { requestLogging: process.env.NODE_ENV === 'development' },
-      security: {
-        requireAuth: process.env.API_KEY_AUTH === 'true',
-        ...(process.env.VALID_API_KEYS && { apiKeys: process.env.VALID_API_KEYS.split(',') }),
-      },
+    const raw = fs.readFileSync(jsonPath, 'utf-8');
+    const inputData = JSON.parse(raw);
+
+    const headers: Record<string,string> = { 'Content-Type': 'application/json' };
+    if (process.env.API_KEY_AUTH === 'true' && process.env.VALID_API_KEYS) {
+      headers['X-API-Key'] = process.env.VALID_API_KEYS.split(',')[0]!.trim();
+    }
+
+    // 1) Crear ticket
+    const createResp = await fetch(`${baseUrl}/api/execute`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ input_data: inputData }),
     });
+    const createJson = await createResp.json().catch(() => ({}));
+    console.log('INIT create status:', createResp.status, JSON.stringify(createJson));
+
+    const requestId = createJson?.output_data?.request_id;
+    if (!requestId) {
+      console.error('INIT: no se obtuvo request_id del create. Abortando flujo.');
+      return;
+    }
+
+    // 2) Decidir (interactivo o automático)
+    let decision: 'accept' | 'reject';
+    if ((process.env.INTERACTIVE_DECIDE ?? 'false').toLowerCase() === 'true') {
+      const yes = await askYesNo(`¿Aceptar pedido ${requestId}?`);
+      decision = yes ? 'accept' : 'reject';
+    } else {
+      decision = (process.env.INIT_DECISION ?? 'accept').toLowerCase() === 'reject' ? 'reject' : 'accept';
+    }
+
+    const postData: AgentInput = { action: decision, request_id: requestId };
+
+    const actResp = await fetch(`${baseUrl}/api/execute`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ input_data: postData }),
+    });
+    const actJson = await actResp.json().catch(() => ({}));
+    console.log(`INIT ${decision} status:`, actResp.status, JSON.stringify(actJson));
+  } catch (e:any) {
+    console.error('INIT flow error:', e?.message || e);
+  }
+}
+
+// ===== Server bootstrap =====
+async function main(){
+  try{
+    const port = process.env.PORT ? parseInt(process.env.PORT,10) : 3000;
+    const host = process.env.HOST || '0.0.0.0';
+
+    // 1) Arranca server HTTP
+    await tool.start({ port, host });
+    const baseUrl = `http://localhost:${port}`;
     console.log('🚀 Agent-03 RS&M split server ready');
-    console.log(`Health:  http://localhost:${process.env.PORT || 3000}/health`);
-    console.log(`Execute: http://localhost:${process.env.PORT || 3000}/api/execute`);
+    console.log(`Health:  ${baseUrl}/health`);
+    console.log(`Execute: ${baseUrl}/api/execute`);
+
+    // 2) Lee input.json y crea ticket
+    const jsonPath = path.resolve('./input.json');
+    if (!fs.existsSync(jsonPath)) {
+      console.log('⚠️ No se encontró input.json, no se creó ticket inicial.');
+      return;
+    }
+    const raw = fs.readFileSync(jsonPath, 'utf-8');
+    const inputData = JSON.parse(raw);
+
+    const createResp = await fetch(`${baseUrl}/api/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input_data: inputData }),
+    });
+    const createJson = await createResp.json();
+    console.log('INIT create:', createJson);
+
+    const requestId = createJson?.output_data?.request_id;
+    if (!requestId) return console.error('❌ No se obtuvo request_id');
+
+    // 3) Preguntar en terminal [y/n]
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(`¿Aceptar pedido ${requestId}? [y/n]: `, async (answer) => {
+      rl.close();
+      const decision = /^y(es)?$|^s(i|í)?$/i.test(answer.trim()) ? 'accept' : 'reject';
+
+      const actResp = await fetch(`${baseUrl}/api/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input_data: { action: decision, request_id: requestId } }),
+      });
+      const actJson = await actResp.json();
+      console.log(`INIT ${decision}:`, actJson);
+    });
+
   } catch (e) {
     console.error('Failed to start:', e);
     process.exit(1);
-
   }
 }
 
