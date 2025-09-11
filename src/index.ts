@@ -160,6 +160,8 @@ async function smartAnalyzeRequest(
 
     // Convertir análisis a formato del agente
     const agentInput = llmService.analysisToAgentInput(analysis, guest_id, room, naturalRequest);
+
+    
     
     if (!agentInput) {
       // Es una consulta/queja, no un servicio
@@ -1247,21 +1249,26 @@ async function main(){
         req.on('end', async () => {
 
           try {
-            const data = JSON.parse(body);
-            const { input_data } = data;
 
-            // Debug logs...
+            const data = JSON.parse(body);
+  
+  // Debug completo
             console.log('=== DEBUG SERVER ===');
-            console.log('Input data:', JSON.stringify(input_data, null, 2));
-      
-            if (!input_data) {
+            console.log('Full body received:', JSON.stringify(data, null, 2));
+  
+  // Extraer input_data o usar data directamente si no viene wrapeado
+            const input_data = data.input_data || data;
+  
+            console.log('Processed input_data:', JSON.stringify(input_data, null, 2));
+
+            if (!input_data || !input_data.guest_id || !input_data.room) {
               res.writeHead(400, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({
-              status: 'error',
-              error: { code: 'MISSING_INPUT_DATA', message: 'input_data is required' }
-            }));
-          return;
-        }
+                status: 'error',
+                error: { code: 'MISSING_REQUIRED_FIELDS', message: 'guest_id and room are required' }
+              }));
+              return;
+            }
 
       // ESTA LÍNEA DEBE ESTAR AQUÍ DENTRO DEL TRY
       const result = await executeAction(input_data as AgentInput, {
