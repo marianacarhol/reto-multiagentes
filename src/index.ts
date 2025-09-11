@@ -75,6 +75,8 @@ interface AgentInput {
 
   // Filtros get_menu
   menu_category?: 'food'|'beverage'|'dessert';
+
+  service_hours?: string;
 }
 
 interface AgentConfig {
@@ -332,13 +334,22 @@ async function rbAddHistory(h: {request_id: string; status: string; actor: strin
 async function mCreateTicket(row: {
   id: string; guest_id: string; room: string; issue: string; severity?: string;
   status: TicketStatus; priority: string; notes?: string;
-}){ const { error } = await supabase.from('tickets_m').insert(row); if (error) throw error; }
-async function mUpdateTicket(id: string, patch: Partial<{status: TicketStatus; priority:string; notes:string}>){
-  const { error } = await supabase.from('tickets_m').update({ ...patch, updated_at: nowISO() }).eq('id', id);
+  service_hours?: string; // ← NUEVO
+}) {
+  const { error } = await supabase.from('tickets_m').insert(row);
   if (error) throw error;
 }
 async function mGetTicket(id: string){ const { data, error } = await supabase.from('tickets_m').select('*').eq('id', id).maybeSingle(); if (error) throw error; return data as any | null; }
-async function mAddHistory(h: {request_id: string; status: string; actor: string; note?: string}){ const { error } = await supabase.from('ticket_history_m').insert({ ...h, ts: nowISO() }); if (error) throw error; }
+async function mAddHistory(h: {
+  request_id: string; status: string; actor: string; note?: string;
+  service_hours?: string; // ← NUEVO
+}) {
+  const { error } = await supabase
+    .from('ticket_history_m')
+    .insert({ ...h, ts: nowISO() });
+  if (error) throw error;
+}
+
 
 // Feedback
 async function addFeedback(rec: {
@@ -460,6 +471,9 @@ const tool = createTool<AgentInput, AgentConfig>({
       action: { type: 'string', enum: ['get_menu','create','status','complete','assign','feedback','confirm_service','accept','reject'], required: false, default: 'create' },
       guest_id: stringField({ required: false }),
       room: stringField({ required: false }),
+
+      service_hours: stringField({ required: false }),
+
 
       restaurant: { type: 'string', required: false, enum: ['rest1','rest2','multi'] },
       type: { type: 'string', required: false, enum: ['food','beverage','maintenance'] },
@@ -614,8 +628,22 @@ const tool = createTool<AgentInput, AgentConfig>({
 
         const computedPriority = input.severity === 'high' ? 'high' : input.priority ?? 'normal';
         const id = `REQ-${Date.now()}`;
-        await mCreateTicket({ id, guest_id: guest_id!, room: room!, issue: input.issue, severity: input.severity, status: 'CREADO', priority: computedPriority, notes: input.notes ?? undefined });
-        await mAddHistory({ request_id: id, status: 'CREADO', actor: 'system' });
+        await mCreateTicket({
+          id, guest_id: guest_id!, room: room!,
+          issue: input.issue, severity: input.severity,
+          status: 'CREADO', priority: computedPriority,
+          notes: input.notes ?? undefined,
+          service_hours: input.service_hours ?? null   // ← NUEVO
+        });
+
+        await mAddHistory({
+          request_id: id,
+          status: 'CREADO',
+          actor: 'system',
+          service_hours: input.service_hours ?? null
+        });
+
+
 
         return { status: 'success', data: { request_id: id, domain: 'm', type, area, status: 'CREADO', message: 'Ticket creado. Usa action "accept" o "reject".' } };
       }
@@ -685,7 +713,14 @@ const tool = createTool<AgentInput, AgentConfig>({
 
         const { error } = await supabase.from('tickets_m').update({ status: newStatus, updated_at: nowISO() }).eq('id', ticket.id);
         if (error) throw error;
-        await mAddHistory({ request_id: ticket.id, status: newStatus, actor: 'agent', note: input.notes });
+        await mAddHistory({
+          request_id: ticket.id,
+          status: newStatus,
+          actor: 'agent',
+          note: input.notes,
+          service_hours: input.service_hours ?? ticket.service_hours ?? null
+        });
+
         return { status: 'success', data: { request_id: ticket.id, status: newStatus } };
       }
 
