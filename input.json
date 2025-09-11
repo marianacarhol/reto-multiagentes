@@ -1,10 +1,9 @@
 {
   "action": "create",
-  "guest_id": "G-1",
+  "guest_id": "G_1",
   "room": "101",
-  "items": [
-    { "name": "Chilaquiles Verdes", "qty": 2 },
-    { "name": "Café Americano", "qty": 1 }
-  ],
-  "notes": "sin cebolla, porfa"
+  "type": "maintenance",
+  "issue": "La regadera tiene fuga y el agua sale muy fría",
+  "severity": "high",
+  "notes": "Si pueden antes de las 5 pm, porfa"
 }
