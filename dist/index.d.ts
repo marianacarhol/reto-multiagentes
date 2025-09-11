@@ -1,16 +1,28 @@
 /**
  * Agent-03 RoomService & Maintenance Tool (Multi-Restaurant)
- * v2.3.1
+ * v2.3.4
  * - Menú dinámico por restaurante (rest1/rest2) con horarios
  * - Ítems de entrada: sólo name (+qty opcional); precio/stock/horario/restaurant desde BD
  * - Tickets RB/M, feedback y cross-sell
+ * - INIT: al iniciar, lee ./input.json, crea ticket y luego:
+ *     - si INTERACTIVE_DECIDE=true -> pregunta por terminal [y/n]
+ *     - si no, usa INIT_DECISION=accept|reject (default accept)
+ *
+ * ENV:
+ *  - INIT_ON_START=true|false         (default true)
+ *  - INIT_JSON_PATH=./input.json      (ruta al json inicial)
+ *  - INTERACTIVE_DECIDE=true|false    (default false -> usa INIT_DECISION)
+ *  - INIT_DECISION=accept|reject      (default accept)
+ *  - API_KEY_AUTH=true|false
+ *  - VALID_API_KEYS=key1,key2
+ *  - SUPABASE_URL, SUPABASE_SERVICE_ROLE
  */
 import 'dotenv/config';
 type ServiceType = 'food' | 'beverage' | 'maintenance';
 interface AgentInput {
-    action?: 'get_menu' | 'create' | 'status' | 'complete' | 'assign' | 'feedback' | 'confirm_service';
-    guest_id: string;
-    room: string;
+    action?: 'get_menu' | 'create' | 'status' | 'complete' | 'assign' | 'feedback' | 'confirm_service' | 'accept' | 'reject';
+    guest_id?: string;
+    room?: string;
     restaurant?: 'rest1' | 'rest2' | 'multi';
     type?: ServiceType;
     items?: Array<{

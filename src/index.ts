@@ -162,6 +162,103 @@ type MenuRow = {
   cross_sell_items?: string[];
 };
 
+// ===== Spend helpers =====
+// Suma lo gastado HOY (UTC) leyendo spend_ledger por occurred_at en rango [00:00, 24:00)
+async function dbGetSpentToday(guest_id: string){
+  const start = new Date();
+  start.setUTCHours(0,0,0,0);
+  const end = new Date(start);
+  end.setUTCDate(start.getUTCDate() + 1);
+
+  const { data, error } = await supabase
+    .from('spend_ledger')
+    .select('amount, occurred_at')
+    .eq('guest_id', guest_id)
+    .gte('occurred_at', start.toISOString())
+    .lt('occurred_at', end.toISOString());
+
+  if (error) throw error;
+  return (data ?? []).reduce((s: number, r: any) => s + Number(r.amount || 0), 0);
+}
+
+// Inserta en ledger una sola vez por (guest_id, request_id)
+async function ledgerInsertOnce(rec: {
+  domain: 'rb'|'m',
+  request_id: string,
+  guest_id: string,
+  amount: number
+}) {
+  const { error } = await supabase
+    .from('spend_ledger')
+    .upsert(
+      [{
+        domain: rec.domain,
+        request_id: rec.request_id,
+        guest_id: rec.guest_id,
+        amount: rec.amount,
+        occurred_at: nowISO(),
+      }],
+      { onConflict: 'guest_id,request_id', ignoreDuplicates: true } // ← cambio aquí
+    );
+  if (error) throw error;
+}
+
+// Intenta RPC decremental atómica; si no existe la RPC, hace fallback 2 pasos
+async function decrementGuestLimitIfEnough(guest_id: string, amount: number) {
+  // 1) Intento con RPC (si existe)
+  try {
+    const { data, error } = await supabase
+      .rpc('decrement_guest_limit_if_enough', { p_guest_id: guest_id, p_amount: amount });
+    if (error) throw error;
+    if (!data || (data as any).updated_rows !== 1) {
+      const err: any = new Error('SPEND_LIMIT_EXCEEDED');
+      err.code = 'SPEND_LIMIT';
+      throw err;
+    }
+    return; // ok
+  } catch (_e) {
+    // 2) Fallback no atómico (dos pasos)
+    const { data, error } = await supabase
+      .from('guests')
+      .select('spend_limit')
+      .eq('id', guest_id)
+      .maybeSingle();
+    if (error) throw error;
+    const current = Number(data?.spend_limit ?? 0);
+    if (current < amount) {
+      const err: any = new Error('SPEND_LIMIT_EXCEEDED');
+      err.code = 'SPEND_LIMIT';
+      throw err;
+    }
+    const newVal = Number((current - amount).toFixed(2));
+    const { error: e2 } = await supabase
+      .from('guests')
+      .update({ spend_limit: newVal })
+      .eq('id', guest_id);
+    if (e2) throw e2;
+  }
+}
+
+// Cobra un ticket RB: idempotente (ledger) + descuenta límite; revierte ledger si falla el descuento
+async function chargeGuestForRB(ticket: { id: string; guest_id: string; total_amount: number }) {
+  const amount = Number(ticket.total_amount || 0);
+  if (amount <= 0) return;
+  await ledgerInsertOnce({ domain: 'rb', request_id: ticket.id, guest_id: ticket.guest_id, amount });
+  try {
+    await decrementGuestLimitIfEnough(ticket.guest_id, amount);
+  } catch (e:any) {
+    // compensar ledger si no se pudo descontar límite
+    await supabase.from('spend_ledger')
+      .delete()
+      .eq('domain', 'rb')
+      .eq('request_id', ticket.id);
+    if (e?.code === 'SPEND_LIMIT') {
+      throw { code: 'SPEND_LIMIT', message: 'Límite de gasto excedido' };
+    }
+    throw e;
+  }
+}
+
 async function dbMenuUnion(): Promise<MenuRow[]> {
   const { data, error } = await supabase.from('menu_union').select('*');
   if (error) throw error;
@@ -478,10 +575,13 @@ const tool = createTool<AgentInput, AgentConfig>({
             return { status: 'error', error: { code: 'ITEMS_UNAVAILABLE', message: String(e?.message || e) } };
           }
 
+          // ---- Límite de gasto (precheck con ledger del día)
           let spendLimit = input.guest_profile?.spend_limit ?? (guest_id ? await dbGetGuestSpendLimit(guest_id) : null);
-          const dailySpend = input.guest_profile?.daily_spend ?? 0;
-          if (spendLimit != null && (dailySpend + total) > spendLimit) {
-            return { status: 'error', error: { code: 'SPEND_LIMIT', message: 'Límite de gasto excedido' } };
+          if (spendLimit != null) {
+            const spentToday = guest_id ? await dbGetSpentToday(guest_id) : 0;
+            if ((spentToday + total) > Number(spendLimit)) {
+              return { status: 'error', error: { code: 'SPEND_LIMIT', message: 'Límite de gasto excedido' } };
+            }
           }
 
           const anchor = (input.restaurant === 'rest1' || input.restaurant === 'rest2') ? input.restaurant : undefined;
@@ -492,7 +592,6 @@ const tool = createTool<AgentInput, AgentConfig>({
             : anchor ?? 'multi';
 
           const id = `REQ-${Date.now()}`;
-          // en CREATE (RB) guardas 'resolved' que viene de resolveAndValidateItems:
           await rbCreateTicket({
             id,
             guest_id: guest_id!,
@@ -500,7 +599,7 @@ const tool = createTool<AgentInput, AgentConfig>({
             restaurant: ticketRestaurant,
             status: 'CREADO',
             priority: input.priority ?? 'normal',
-            items: resolved,              // ← debe incluir: id, name, qty, price, restaurant, category
+            items: resolved,
             total_amount: total,
             notes: input.notes ?? undefined
           });
@@ -544,20 +643,33 @@ const tool = createTool<AgentInput, AgentConfig>({
         // Historial de la decisión
         await rbAddHistory({ request_id: ticket.id, status: newStatus, actor: 'agent', note: input.notes });
 
-        // Si se aceptó: bajar stock + ping por restaurante
+        // Si se aceptó: COBRAR (idempotente) + bajar stock + ping por restaurante
         if (action === 'accept') {
           try {
-            // ticket.items viene del create (ResolvedItem[]). Mantén ese shape al guardar.
+            // 1) cobro + descuento de límite (reversible si falla)
+            await chargeGuestForRB({ id: ticket.id, guest_id: ticket.guest_id, total_amount: ticket.total_amount });
+
+            // 2) stock
             await decrementStock(ticket.items || []);
 
-            // “ping” a cada restaurante involucrado (si items tienen restaurant)
+            // 3) pings por restaurante
             const restSet = new Set<string>((ticket.items || []).map((i: any) => i.restaurant).filter(Boolean));
             for (const r of restSet) {
               await rbAddHistory({ request_id: ticket.id, status: 'ACEPTADA', actor: r });
             }
           } catch (e:any) {
-            // deja constancia si falló el stock
-            await rbAddHistory({ request_id: ticket.id, status: newStatus, actor: 'system', note: `Stock update failed: ${e?.message || e}` });
+            // deja constancia y revierte estado a CREADO
+            await rbAddHistory({
+              request_id: ticket.id,
+              status: ticket.status,
+              actor: 'system',
+              note: `Accept failed: ${e?.code || ''} ${e?.message || e}`
+            });
+            await supabase.from('tickets_rb')
+              .update({ status: 'CREADO', updated_at: nowISO() })
+              .eq('id', ticket.id);
+
+            return { status: 'error', error: { code: e?.code || 'PAYMENT_ERROR', message: e?.message || 'No se pudo cobrar' } };
           }
         }
 

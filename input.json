@@ -1,7 +1,7 @@
 {
     "action": "create",
     "guest_id": "G-1",
-    "room": "101",
+    "room": "1205",
     "items": [
       { "name": "Tostadas de Tinga" }
     ],
