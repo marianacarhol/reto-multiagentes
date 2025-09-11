@@ -44,7 +44,8 @@
   "dependencies": {
     "@ai-spine/tools": "^1.0.0",
     "@supabase/supabase-js": "^2.57.0",
-    "dotenv": "^17.2.2"
+    "dotenv": "^17.2.2",
+    "openai": "^5.20.1"
   },
   "devDependencies": {
     "@types/eslint": "^8.44.8",
