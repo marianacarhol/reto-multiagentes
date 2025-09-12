@@ -1,23 +1,7 @@
-// index.ts
+// src/index.ts
 /**
  * Agent-03 RoomService & Maintenance Tool (Multi-Restaurant)
- * v2.3.4
- * - Menú dinámico por restaurante (rest1/rest2) con horarios
- * - Ítems de entrada: sólo name (+qty opcional); precio/stock/horario/restaurant desde BD
- * - Tickets RB/M, feedback y cross-sell
- * - INIT opcional: lee ./input.json y ejecuta flujo create -> accept/reject
- *
- * ENV:
- *  - INIT_ON_START=true|false         (default true)
- *  - INIT_JSON_PATH=./input.json
- *  - INTERACTIVE_DECIDE=true|false    (default false)
- *  - INIT_DECISION=accept|reject      (default accept)
- *  - API_KEY_AUTH=true|false
- *  - VALID_API_KEYS=key1,key2
- *  - SUPABASE_URL, SUPABASE_SERVICE_ROLE
- *  - PRIORITY_API_URL=http://localhost:8000/predict
  */
-
 import 'dotenv/config';
 import {
   createTool,
@@ -26,539 +10,26 @@ import {
   booleanField,
   type ToolExecutionResult,
 } from '@ai-spine/tools';
-import { createClient } from '@supabase/supabase-js';
+
 import fs from 'fs';
 import path from 'path';
-import readline from 'readline';
 
-type ServiceType = 'food' | 'beverage' | 'maintenance';
-type TicketStatus = 'CREADO' | 'ACEPTADA' | 'EN_PROCESO' | 'COMPLETADA' | 'RECHAZADA' | 'CANCELADO';
+import type { ServiceType, TicketStatus, ResolvedItem } from './types';
+import type { AgentInput } from './agent/agentInput';
+import type { AgentConfig } from './agent/agentConfig';
 
-interface AgentInput {
-  action?: 'get_menu' | 'create' | 'status' | 'complete' | 'assign' | 'feedback' | 'confirm_service' | 'accept' | 'reject' | 'cancel';
+import {
+  nowISO, hhmm, isInRange, toHHMM, classify, mapArea, withinWindow,
+  getPriorityFromAPI, calcEtaToSLA, envBool
+} from './utils/utils';
 
-  // Identidad básica
-  guest_id?: string;
-  room?: string;
+import {
+  dbGetGuestSpendLimit, dbValidateGuestAndRoom, dbGetSpentToday,
+  chargeGuestForRB, dbMenuUnion, decrementStock, resolveAndValidateItems,
+  rbCreateTicket, rbGetTicket, rbAddHistory, pickCrossSellByCategory, addFeedback
+} from './api/rbApi';
 
-  // Room Service
-  restaurant?: 'rest1' | 'rest2' | 'multi';
-  type?: ServiceType;
-  items?: Array<{ id?: string; name: string; qty?: number }>;
-
-  // Mantenimiento
-  issue?: string;
-  severity?: 'low'|'medium'|'high';
-
-  // Comunes
-  text?: string;
-  notes?: string;
-  priority?: 'low'|'normal'|'high';
-
-  now?: string;
-  do_not_disturb?: boolean;
-  guest_profile?: {
-    tier?: 'standard' | 'gold' | 'platinum';
-    daily_spend?: number;
-    spend_limit?: number;
-    preferences?: string[];
-  };
-  access_window?: { start: string; end: string };
-
-  // Transiciones
-  request_id?: string;
-
-  // Confirmación/Feedback
-  service_feedback?: string;
-  service_completed_by?: string;
-
-  // Filtros get_menu
-  menu_category?: 'food'|'beverage'|'dessert';
-
-  service_hours?: string;
-}
-
-interface AgentConfig {
-  accessWindowStart?: string;
-  accessWindowEnd?: string;
-  enable_stock_check?: boolean;
-  enable_cross_sell?: boolean;
-  cross_sell_threshold?: number;
-
-  cross_sell_per_category?: boolean;
-  cross_sell_per_category_count?: number;     // 1..3
-  cross_sell_prefer_opposite?: boolean;
-
-  api_key?: string;
-  default_count?: number;
-}
-
-const supabase = createClient(
-  process.env.SUPABASE_URL ?? '',
-  process.env.SUPABASE_SERVICE_ROLE ?? ''
-);
-
-// ===== Utils
-const nowISO = () => new Date().toISOString();
-const pad2 = (n: number) => String(n).padStart(2, '0');
-const hhmm = (nowStr?: string) => {
-  const d = nowStr ? new Date(nowStr) : new Date();
-  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-};
-const isInRange = (cur: string, start: string, end: string) =>
-  start <= end ? (cur >= start && cur <= end) : (cur >= start || cur <= end);
-
-const classify = (text?: string, items?: Array<{name:string}>, explicit?: ServiceType): ServiceType => {
-  if (explicit) return explicit;
-  const blob = `${text ?? ''} ${(items ?? []).map(i=>i.name).join(' ')}`.toLowerCase();
-  if (/(repair|leak|broken|fuga|mantenimiento|plomer|reparar|aire acondicionado|tv|luz|calefacci[oó]n|ducha|inodoro)/i.test(blob))
-    return 'maintenance';
-  if (/(beer|vino|coca|bebida|agua|jugo|drink|cerveza|whiskey|ron|vodka|cocktail)/i.test(blob))
-    return 'beverage';
-  return 'food';
-};
-const mapArea = (type: ServiceType) =>
-  type === 'maintenance' ? 'maintenance' : type === 'beverage' ? 'bar' : 'kitchen';
-const withinWindow = (
-  nowStr: string | undefined,
-  window: {start:string; end:string} | undefined,
-  cfg: {start?:string; end?:string},
-  dnd?: boolean
-) => {
-  if (dnd) return false;
-  const start = window?.start ?? cfg.start;
-  const end   = window?.end   ?? cfg.end;
-  if (!start || !end) return true;
-  return isInRange(hhmm(nowStr), start, end);
-};
-
-function toHHMM(s: string) { return s.toString().slice(0,5); }
-function normName(s?: string){
-  return (s ?? '')
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .toLowerCase().trim().replace(/\s+/g,' ');
-}
-
-// ===== PRIORITY (TF-IDF + LogReg servido en FastAPI) =====
-const PRIORITY_API_URL = process.env.PRIORITY_API_URL || 'http://localhost:8000/predict';
-
-function calcEtaToSLA(params: {
-  domain: 'rb'|'m';
-  type?: ServiceType;
-  createdAtISO?: string;
-}) {
-  const now = new Date();
-  const created = params.createdAtISO ? new Date(params.createdAtISO) : now;
-  const elapsedMin = Math.floor((now.getTime() - created.getTime()) / 60000);
-  const slaMin = params.domain === 'rb' ? 45 : 120; // ajusta a tus SLAs reales
-  return slaMin - elapsedMin;
-}
-
-type PriorityOut = {
-  priority: 'low'|'medium'|'high';
-  score: number;
-  proba?: Record<string, number>;
-  needs_review?: boolean;
-  model?: string;
-};
-
-function hardRulesFallback(payload: { text?: string; vip?: boolean|number; eta_to_sla_min?: number; }): PriorityOut {
-  const t = (payload.text || '').toLowerCase();
-  const danger = /(fuga|leak|humo|incendio|chispa|descarga|sangre|shock|smoke|fire)/i.test(t);
-  if (danger) return { priority: 'high', score: 95, model: 'rules' };
-  const soon = (payload.eta_to_sla_min ?? 999) < 30;
-  const vip = !!payload.vip;
-  if (soon && vip) return { priority: 'high', score: 80, model: 'rules' };
-  if (soon) return { priority: 'medium', score: 65, model: 'rules' };
-  return { priority: 'low', score: 30, model: 'rules' };
-}
-
-async function getPriorityFromAPI(input: {
-  text: string;
-  domain: 'rb'|'m';
-  vip: 0|1;
-  spend30d: number;
-  eta_to_sla_min: number;
-}): Promise<PriorityOut> {
-  try {
-    const res = await fetch(PRIORITY_API_URL, {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(input),
-    });
-    if (!res.ok) throw new Error(`priority api ${res.status}`);
-    const json = await res.json();
-    let p = (json.priority || '').toLowerCase();
-    if (!['low','medium','high'].includes(p)) p = 'medium';
-    return {
-      priority: p as 'low'|'medium'|'high',
-      score: Number(json.score ?? 0),
-      proba: json.proba,
-      needs_review: !!json.needs_review,
-      model: json.model || 'tfidf_logreg_v1'
-    };
-  } catch (_e) {
-    return hardRulesFallback({
-      text: input.text,
-      vip: input.vip,
-      eta_to_sla_min: input.eta_to_sla_min
-    });
-  }
-}
-
-// ===== DB helpers
-async function dbGetGuestSpendLimit(guest_id: string){
-  const { data, error } = await supabase.from('guests')
-    .select('spend_limit')
-    .eq('id', guest_id)
-    .maybeSingle();
-  if (error) throw error;
-  return data?.spend_limit as number | null | undefined;
-}
-
-type MenuRow = {
-  restaurant: 'rest1'|'rest2';
-  id: string;
-  name: string;
-  price: number;
-  category: 'food'|'beverage'|'dessert';
-  available_start: string; // HH:MM:SS
-  available_end: string;   // HH:MM:SS
-  stock_current: number;
-  stock_minimum: number;
-  is_active: boolean;
-  cross_sell_items?: string[];
-};
-
-type GuestRow = {
-  id: string;
-  nombre?: string | null;
-  room?: string | null;
-  spend_limit?: number | null;
-};
-
-async function dbGetGuestById(guest_id: string): Promise<GuestRow | null> {
-  const { data, error } = await supabase
-    .from('guests')
-    .select('id, nombre, room, spend_limit')
-    .eq('id', guest_id)
-    .maybeSingle();
-  if (error) throw error;
-  return (data as GuestRow) ?? null;
-}
-
-async function dbValidateGuestAndRoom(guest_id: string, room: string) {
-  const g = await dbGetGuestById(guest_id);
-  if (!g) {
-    const err: any = new Error('GUEST_NOT_FOUND');
-    err.code = 'GUEST_NOT_FOUND';
-    err.message = `Huésped "${guest_id}" no existe`;
-    throw err;
-  }
-  // si tu columna room puede venir null, permitimos crear sólo si input.room también es null/igual
-  const dbRoom = (g.room ?? '').trim();
-  const inRoom = (room ?? '').trim();
-  if (dbRoom && inRoom && dbRoom !== inRoom) {
-    const err: any = new Error('ROOM_MISMATCH');
-    err.code = 'ROOM_MISMATCH';
-    err.message = `La habitación no coincide (guest=${dbRoom}, input=${inRoom})`;
-    throw err;
-  }
-  return g; // por si luego quieres usar spend_limit, nombre, etc.
-}
-
-// ===== Spend helpers =====
-async function dbGetSpentToday(guest_id: string){
-  const start = new Date();
-  start.setUTCHours(0,0,0,0);
-  const end = new Date(start);
-  end.setUTCDate(start.getUTCDate() + 1);
-
-  const { data, error } = await supabase
-    .from('spend_ledger')
-    .select('amount, occurred_at')
-    .eq('guest_id', guest_id)
-    .gte('occurred_at', start.toISOString())
-    .lt('occurred_at', end.toISOString());
-
-  if (error) throw error;
-  return (data ?? []).reduce((s: number, r: any) => s + Number(r.amount || 0), 0);
-}
-
-// Inserta en ledger una sola vez por (guest_id, request_id)
-async function ledgerInsertOnce(rec: {
-  domain: 'rb'|'m',
-  request_id: string,
-  guest_id: string,
-  amount: number
-}) {
-  const { error } = await supabase
-    .from('spend_ledger')
-    .upsert(
-      [{
-        domain: rec.domain,
-        request_id: rec.request_id,
-        guest_id: rec.guest_id,
-        amount: rec.amount,
-        occurred_at: nowISO(),
-      }],
-      { onConflict: 'guest_id,request_id', ignoreDuplicates: true }
-    );
-  if (error) throw error;
-}
-
-// Intenta RPC decremental atómica; si no existe la RPC, hace fallback 2 pasos
-async function decrementGuestLimitIfEnough(guest_id: string, amount: number) {
-  try {
-    const { data, error } = await supabase
-      .rpc('decrement_guest_limit_if_enough', { p_guest_id: guest_id, p_amount: amount });
-    if (error) throw error;
-    if (!data || (data as any).updated_rows !== 1) {
-      const err: any = new Error('SPEND_LIMIT_EXCEEDED');
-      err.code = 'SPEND_LIMIT';
-      throw err;
-    }
-    return;
-  } catch (_e) {
-    const { data, error } = await supabase
-      .from('guests')
-      .select('spend_limit')
-      .eq('id', guest_id)
-      .maybeSingle();
-    if (error) throw error;
-    const current = Number(data?.spend_limit ?? 0);
-    if (current < amount) {
-      const err: any = new Error('SPEND_LIMIT_EXCEEDED');
-      err.code = 'SPEND_LIMIT';
-      throw err;
-    }
-    const newVal = Number((current - amount).toFixed(2));
-    const { error: e2 } = await supabase
-      .from('guests')
-      .update({ spend_limit: newVal })
-      .eq('id', guest_id);
-    if (e2) throw e2;
-  }
-}
-
-// Cobra un ticket RB
-async function chargeGuestForRB(ticket: { id: string; guest_id: string; total_amount: number }) {
-  const amount = Number(ticket.total_amount || 0);
-  if (amount <= 0) return;
-  await ledgerInsertOnce({ domain: 'rb', request_id: ticket.id, guest_id: ticket.guest_id, amount });
-  try {
-    await decrementGuestLimitIfEnough(ticket.guest_id, amount);
-  } catch (e:any) {
-    await supabase.from('spend_ledger')
-      .delete()
-      .eq('domain', 'rb')
-      .eq('request_id', ticket.id);
-    if (e?.code === 'SPEND_LIMIT') {
-      throw { code: 'SPEND_LIMIT', message: 'Límite de gasto excedido' };
-    }
-    throw e;
-  }
-}
-
-async function dbMenuUnion(): Promise<MenuRow[]> {
-  const { data, error } = await supabase.from('menu_union').select('*');
-  if (error) throw error;
-  return (data ?? []) as any;
-}
-
-// ------- Resolver & validar ítems desde BD --------
-type ResolvedItem = {
-  id: string;
-  name: string;
-  qty: number;
-  price: number;
-  restaurant: 'rest1'|'rest2';
-  category: 'food'|'beverage'|'dessert';
-};
-
-async function resolveAndValidateItems(
-  rawItems: Array<{id?: string; name: string; qty?: number}>,
-  nowStr?: string,
-  enableStockCheck: boolean = true
-): Promise<{ items: ResolvedItem[]; total: number; restSet: Set<'rest1'|'rest2'>; }> {
-  const menu = await dbMenuUnion();
-  const cur = hhmm(nowStr);
-
-  const byId = new Map(menu.map(m => [m.id, m]));
-  const byName = new Map(menu.map(m => [normName(m.name), m]));
-
-  const resolved: ResolvedItem[] = [];
-
-  for (const it of (rawItems ?? [])) {
-    const row = it.id ? byId.get(it.id) : byName.get(normName(it.name));
-    if (!row) throw new Error(`No encontrado en menú: ${it.name}`);
-
-    const active = row.is_active === true;
-    const inTime = isInRange(cur, toHHMM(row.available_start as any), toHHMM(row.available_end as any));
-    const stockOK = !enableStockCheck || (row.stock_current > row.stock_minimum);
-
-    if (!active)  throw new Error(`Inactivo: ${row.name}`);
-    if (!inTime)  throw new Error(`Fuera de horario: ${row.name}`);
-    if (!stockOK) throw new Error(`Sin stock suficiente: ${row.name}`);
-
-    const qty = Math.max(1, it.qty ?? 1);
-
-    resolved.push({
-      id: row.id,
-      name: row.name,
-      qty,
-      price: Number(row.price),
-      restaurant: row.restaurant as 'rest1'|'rest2',
-      category: row.category as any,
-    });
-  }
-
-  const total = resolved.reduce((acc, r) => acc + r.price * r.qty, 0);
-  const restSet = new Set(resolved.map(r => r.restaurant));
-  return { items: resolved, total, restSet };
-}
-
-// ===== RB / M
-async function rbCreateTicket(row: {
-  id: string; guest_id: string; room: string; restaurant: 'rest1'|'rest2'|'multi';
-  status: TicketStatus; priority: string; items: any; total_amount: number; notes?: string;
-}){ const { error } = await supabase.from('tickets_rb').insert(row); if (error) throw error; }
-
-async function rbUpdateTicket(id: string, patch: Partial<{status: TicketStatus; priority:string; notes:string}>){
-  const { error } = await supabase.from('tickets_rb').update({ ...patch, updated_at: nowISO() }).eq('id', id);
-  if (error) throw error;
-}
-async function rbGetTicket(id: string){ const { data, error } = await supabase.from('tickets_rb').select('*').eq('id', id).maybeSingle(); if (error) throw error; return data as any | null; }
-async function rbAddHistory(h: {request_id: string; status: string; actor: string; note?: string; feedback?: string}) {
-  const { error } = await supabase
-    .from('ticket_history_rb')
-    .insert({ ...h, ts: nowISO() });
-  if (error) throw error;
-}
-
-async function mCreateTicket(row: {
-  id: string; guest_id: string; room: string; issue: string; severity?: string;
-  status: TicketStatus; priority: string; notes?: string;
-  service_hours?: string | null;
-  priority_score?: number; priority_model?: string; priority_proba?: any; needs_review?: boolean;
-}) {
-  const { error } = await supabase.from('tickets_m').insert(row);
-  if (error) throw error;
-}
-async function mGetTicket(id: string){ const { data, error } = await supabase.from('tickets_m').select('*').eq('id', id).maybeSingle(); if (error) throw error; return data as any | null; }
-async function mAddHistory(h: {request_id: string; status: string; actor: string; note?: string; feedback?: string; service_hours?: string}) {
-  const { error } = await supabase
-    .from('ticket_history_m')
-    .insert({ ...h, ts: nowISO() });
-  if (error) throw error;
-}
-
-
-// Feedback
-async function addFeedback(rec: {
-  domain: 'rb'|'m';
-  guest_id: string;
-  request_id: string;
-  message?: string;
-}){
-  const { error } = await supabase.from('feedback').insert({
-    domain: rec.domain,
-    guest_id: rec.guest_id,
-    request_id: rec.request_id,
-    message: rec.message ?? null,
-    created_at: nowISO(),
-  });
-  if (error) throw error;
-}
-
-// Descontar stock
-async function decrementStock(items: Array<{id?:string; name:string; restaurant?:'rest1'|'rest2'; qty?:number}>){
-  if (!items?.length) return;
-  const menu = await dbMenuUnion();
-
-  const byId = new Map(menu.map(m => [m.id, m]));
-  const byName = new Map(menu.map(m => [normName(m.name), m]));
-
-  for (const it of items) {
-    const row = it.id ? byId.get(it.id) : byName.get(normName(it.name));
-    if (!row) continue; // si no está, no descuenta
-    const table = row.restaurant === 'rest1' ? 'rest1_menu_items' : 'rest2_menu_items';
-    const qty = Math.max(1, it.qty ?? 1);
-    const newStock = Math.max(0, (row.stock_current ?? 0) - qty);
-    const { error } = await supabase.from(table).update({ stock_current: newStock, updated_at: nowISO() }).eq('id', row.id);
-    if (error) throw error;
-  }
-}
-
-// Cross-sell (usado si habilitas cross-sell)
-function pickCrossSellByCategory(
-  menu: MenuRow[],
-  chosen: Array<{id?:string; name:string; restaurant?:'rest1'|'rest2'}>,
-  opts: {
-    nowHHMM: string;
-    perCategoryCount: number;
-    preferOppositeOf?: 'rest1'|'rest2';
-    explicitType?: 'food'|'beverage'|'maintenance';
-    forbidSameCategoryIfPresent?: boolean;
-  }
-){
-  const norm = (s?: string) => (s ?? '')
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .toLowerCase().trim().replace(/\s+/g,' ');
-
-  const chosenIds = new Set(chosen.map(c => c.id).filter(Boolean) as string[]);
-  const chosenNames = new Set(chosen.map(c => norm(c.name)));
-
-  const byName = new Map(menu.map(m => [norm(m.name), m]));
-  const chosenRows: MenuRow[] = chosen.map(it => it.id ? menu.find(m => m.id === it.id) : byName.get(norm(it.name))).filter(Boolean) as MenuRow[];
-
-  const chosenCats = new Set<'food'|'beverage'|'dessert'>(chosenRows.map(r => r.category) as any);
-  if (opts.explicitType === 'food' || opts.explicitType === 'beverage') {
-    if (!chosenCats.has(opts.explicitType)) chosenCats.add(opts.explicitType);
-  }
-
-  const allCats = ['food','beverage','dessert'] as const;
-  const targetCats: Array<'food'|'beverage'|'dessert'> = [];
-  for (const cat of allCats) {
-    if (opts.forbidSameCategoryIfPresent && chosenCats.has(cat)) continue;
-    if (!chosenCats.has(cat)) targetCats.push(cat);
-  }
-  if (targetCats.length === 0) return [];
-
-  const available = menu.filter(r =>
-    r.is_active && r.stock_current > r.stock_minimum &&
-    isInRange(opts.nowHHMM, (r.available_start as any).toString().slice(0,5), (r.available_end as any).toString().slice(0,5)) &&
-    !chosenIds.has(r.id) && !chosenNames.has(norm(r.name))
-  );
-
-  const byCat = new Map<'food'|'beverage'|'dessert', MenuRow[]>();
-  for (const c of allCats) byCat.set(c, []);
-  for (const r of available) byCat.get(r.category as any)!.push(r);
-
-  if (opts.preferOppositeOf) {
-    for (const cat of allCats) {
-      const arr = byCat.get(cat)!;
-      arr.sort((a,b)=>{
-        if (a.restaurant === opts.preferOppositeOf && b.restaurant !== opts.preferOppositeOf) return -1;
-        if (a.restaurant !== opts.preferOppositeOf && b.restaurant === opts.preferOppositeOf) return 1;
-        return 0;
-      });
-    }
-  }
-
-  const picks: any[] = [];
-  for (const cat of targetCats) {
-    const pool = byCat.get(cat) ?? [];
-    if (!pool.length) continue;
-    for (let i = pool.length-1; i>0; i--){
-      const j = Math.floor(Math.random()*(i+1));
-      [pool[i], pool[j]] = [pool[j], pool[i]];
-    }
-    const count = Math.max(1, Math.min(3, opts.perCategoryCount));
-    for (const r of pool.slice(0, count)) picks.push({ restaurant: r.restaurant, id: r.id, name: r.name, price: r.price, category: r.category });
-  }
-  return picks;
-}
+import { mCreateTicket, mGetTicket, mAddHistory } from './api/maintenanceApi';
 
 // ===== Tool
 const tool = createTool<AgentInput, AgentConfig>({
@@ -692,10 +163,7 @@ const tool = createTool<AgentInput, AgentConfig>({
 
           const rawItems = input.items ?? [];
           if (rawItems.length === 0) {
-            return {
-              status: 'error',
-              error: { code: 'NEED_ITEMS', message: 'Debes proporcionar al menos un ítem del menú.' }
-            };
+            return { status: 'error', error: { code: 'NEED_ITEMS', message: 'Debes proporcionar al menos un ítem del menú.' } };
           }
 
           let resolved: ResolvedItem[] = [];
@@ -731,7 +199,6 @@ const tool = createTool<AgentInput, AgentConfig>({
             }
           }
 
-          const anchor = (input.restaurant === 'rest1' || input.restaurant === 'rest2') ? input.restaurant : undefined;
           const ticketRestaurant: 'rest1'|'rest2'|'multi' =
             restSet.size > 1 ? 'multi' :
             restSet.size === 1 ? Array.from(restSet)[0] as ('rest1'|'rest2') :
@@ -743,7 +210,6 @@ const tool = createTool<AgentInput, AgentConfig>({
           // ---- CROSS-SELL (opcional)
           let crossSell: Array<{restaurant:'rest1'|'rest2'; id:string; name:string; price:number; category:'food'|'beverage'|'dessert'}> = [];
           if (config.enable_cross_sell !== false) {
-            // Preferir “opuesto” cuando el pedido viene de un solo restaurant
             const preferOppositeOf =
               (config.cross_sell_prefer_opposite && (input.restaurant === 'rest1' || input.restaurant === 'rest2'))
                 ? (input.restaurant === 'rest1' ? 'rest2' : 'rest1')
@@ -752,18 +218,16 @@ const tool = createTool<AgentInput, AgentConfig>({
             const menu = await dbMenuUnion();
             crossSell = pickCrossSellByCategory(
               menu,
-              resolved, // lo que ya eligió el huésped
+              resolved,
               {
                 nowHHMM,
                 perCategoryCount: Math.max(1, Math.min(3, config.cross_sell_per_category_count ?? 1)),
                 preferOppositeOf: preferOppositeOf as ('rest1'|'rest2'|undefined),
-                explicitType: type, // 'food' o 'beverage'
-                // si ya trae p.ej. food, intenta sugerir categorías distintas cuando está activo per-category
+                explicitType: type,
                 forbidSameCategoryIfPresent: !!config.cross_sell_per_category
               }
             );
 
-            // Si quieres umbral mínimo de ítems comprados antes de sugerir
             const threshold = Number(config.cross_sell_threshold ?? 1);
             if ((resolved?.length ?? 0) < threshold) crossSell = [];
           }
@@ -820,7 +284,6 @@ const tool = createTool<AgentInput, AgentConfig>({
           severityM === 'low'  ? 'low'  :
           (input.priority ?? 'normal');
 
-        // Ventana local para la CREACIÓN
         const serviceHoursCreate =
           input.access_window
             ? `${toHHMM(input.access_window.start)}-${toHHMM(input.access_window.end)}`
@@ -862,7 +325,7 @@ const tool = createTool<AgentInput, AgentConfig>({
         }
         else if (action === 'cancel') newStatus = 'CANCELADO';
 
-        const { error } = await supabase
+        const { error } = await (await import('./api/rbApi')).supabase
           .from('tickets_rb')
           .update({ status: newStatus, updated_at: nowISO() })
           .eq('id', ticket.id);
@@ -885,7 +348,7 @@ const tool = createTool<AgentInput, AgentConfig>({
               actor: 'system',
               note: `Accept failed: ${e?.code || ''} ${e?.message || e}`
             });
-            await supabase.from('tickets_rb')
+            await (await import('./api/rbApi')).supabase.from('tickets_rb')
               .update({ status: 'CREADO', updated_at: nowISO() })
               .eq('id', ticket.id);
 
@@ -904,16 +367,15 @@ const tool = createTool<AgentInput, AgentConfig>({
         else if (action === 'status') return { status: 'success', data: { request_id: ticket.id, status: ticket.status } };
         else if (action === 'cancel') newStatus = 'CANCELADO';
 
-        // Normaliza/arrastra ventana para transiciones
         const serviceHours =
           input.access_window
             ? `${toHHMM(input.access_window.start)}-${toHHMM(input.access_window.end)}`
             : (input.service_hours ?? ticket.service_hours ?? null);
 
         const patch: any = { status: newStatus, updated_at: nowISO() };
-        if (serviceHours != null) patch.service_hours = serviceHours;        
+        if (serviceHours != null) patch.service_hours = serviceHours;
 
-        const { error: mUpdErr } = await supabase
+        const { error: mUpdErr } = await (await import('./api/rbApi')).supabase
           .from('tickets_m')
           .update(patch)
           .eq('id', ticket.id);
@@ -930,10 +392,6 @@ const tool = createTool<AgentInput, AgentConfig>({
       }
 
       if (action === 'feedback') {
-        if (!input.request_id) {
-          return { status: 'error', error: { code: 'MISSING_REQUEST_ID', message: 'request_id es requerido' } };
-        }
-
         const ticketRB = await rbGetTicket(input.request_id);
         const ticketM  = ticketRB ? null : await mGetTicket(input.request_id);
         if (!ticketRB && !ticketM) {
@@ -941,7 +399,7 @@ const tool = createTool<AgentInput, AgentConfig>({
         }
 
         const domain: 'rb'|'m' = ticketRB ? 'rb' : 'm';
-        const guest_id = (ticketRB ?? ticketM)!.guest_id;
+        const guest_id2 = (ticketRB ?? ticketM)!.guest_id;
 
         if (input.service_feedback == null) {
           return { status: 'error', error: { code: 'EMPTY_FEEDBACK', message: 'Provee service_feedback' } };
@@ -949,13 +407,13 @@ const tool = createTool<AgentInput, AgentConfig>({
 
         await addFeedback({
           domain,
-          guest_id,
+          guest_id: guest_id2,
           request_id: input.request_id,
           message: input.service_feedback,
         });
 
         if (domain === 'rb') {
-          await supabase
+          await (await import('./api/rbApi')).supabase
             .from('tickets_rb')
             .update({ feedback: input.service_feedback ?? null, updated_at: nowISO() })
             .eq('id', input.request_id);
@@ -968,7 +426,7 @@ const tool = createTool<AgentInput, AgentConfig>({
           });
 
         } else {
-          await supabase
+          await (await import('./api/rbApi')).supabase
             .from('tickets_m')
             .update({ feedback: input.service_feedback ?? null, updated_at: nowISO() })
             .eq('id', input.request_id);
@@ -997,25 +455,8 @@ const tool = createTool<AgentInput, AgentConfig>({
   },
 });
 
-// ===== Helpers CLI
-function askYesNo(question: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(`${question} [y/n]: `, (answer) => {
-      rl.close();
-      const a = (answer || '').trim().toLowerCase();
-      resolve(a === 'y' || a === 'yes' || a === 's' || a === 'si' || a === 'sí');
-    });
-  });
-}
-
-function envBool(name: string, def = true) {
-  const raw = (process.env[name] ?? '').trim().toLowerCase();
-  if (raw === '') return def; // si no está seteado, usa default
-  return ['1','true','t','yes','y','si','sí','on'].includes(raw);
-}
-
 // ===== INIT: create -> accept/reject -> complete/cancel -> feedback (solo askYesNo) =====
+import { askYesNo } from './utils/utils';
 async function runInitFlow(baseUrl: string) {
   try {
     const resolvedPath = path.resolve(process.env.INIT_JSON_PATH ?? './input.json');
@@ -1117,10 +558,10 @@ async function runInitFlow(baseUrl: string) {
       );
     }
 
-    // 4) Feedback (opcional). Solo askYesNo; si dice que sí, pedimos texto inline sin helper extra.
+    // 4) Feedback (opcional)
     const wantsFeedback = await askYesNo('¿Quieres agregar un comentario/feedback?');
     if (wantsFeedback) {
-      // Abrimos readline aquí mismo (inline).
+      const readline = await import('readline');
       const comment: string = await new Promise((resolve) => {
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
         rl.question('Comentario: ', (answer) => {
@@ -1155,7 +596,6 @@ async function runInitFlow(baseUrl: string) {
     console.error('[INIT] flow error:', e?.message || e);
   }
 }
-
 
 // ===== Server bootstrap =====
 async function main(){
