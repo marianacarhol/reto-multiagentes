@@ -1,8 +1,15 @@
 {
+  "input_data": {
     "action": "create",
-    "guest_id": "G-3",
-    "room": "101",
+    "guest_id": "G-1",
+    "room": "1205",
     "type": "maintenance",
-    "issue": "La regadera tiene fuga y el agua sale muy fría",
-    "notes": "Si pueden antes de las 5 pm, porfa"
+    "issue": "El aire acondicionado no enfría bien",
+    "severity": "medium",
+    "access_window": {
+      "start": "09:00",
+      "end": "12:30"
+    },
+    "notes": "Favor de revisar lo antes posible"
   }
+}

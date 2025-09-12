@@ -781,12 +781,18 @@ const tool = createTool<AgentInput, AgentConfig>({
           severityM === 'low'  ? 'low'  :
           (input.priority ?? 'normal');
 
+        // Ventana local para la CREACIÓN
+        const serviceHoursCreate =
+          input.access_window
+            ? `${toHHMM(input.access_window.start)}-${toHHMM(input.access_window.end)}`
+            : (input.service_hours ?? null);
+
         await mCreateTicket({
           id, guest_id: guest_id!, room: room!,
           issue: input.issue, severity: severityM,
           status: 'CREADO', priority: priorityLabelM,
           notes: input.notes ?? undefined,
-          service_hours: input.service_hours ?? null,
+          service_hours: serviceHoursCreate,
           priority_score: priM.score,
           priority_model: priM.model,
           priority_proba: priM.proba ?? null,
@@ -797,7 +803,7 @@ const tool = createTool<AgentInput, AgentConfig>({
           request_id: id,
           status: 'CREADO',
           actor: 'system',
-          service_hours: input.service_hours ?? null
+          service_hours: serviceHoursCreate,
         });
 
         return { status: 'success', data: { request_id: id, domain: 'm', type, area, status: 'CREADO', message: 'Ticket creado. Usa action "accept" o "reject".' } };
@@ -858,12 +864,27 @@ const tool = createTool<AgentInput, AgentConfig>({
         else if (action === 'complete') newStatus = 'COMPLETADA';
         else if (action === 'status') return { status: 'success', data: { request_id: ticket.id, status: ticket.status } };
         else if (action === 'cancel') newStatus = 'CANCELADO';
+
+        // Normaliza/arrastra ventana para transiciones
+        const serviceHours =
+          input.access_window
+            ? `${toHHMM(input.access_window.start)}-${toHHMM(input.access_window.end)}`
+            : (input.service_hours ?? ticket.service_hours ?? null);
+
+        const patch: any = { status: newStatus, updated_at: nowISO() };
+        if (serviceHours != null) patch.service_hours = serviceHours;        
+
+        const { error: mUpdErr } = await supabase
+          .from('tickets_m')
+          .update(patch)
+          .eq('id', ticket.id);
+        if (mUpdErr) throw mUpdErr;
         await mAddHistory({
           request_id: ticket.id,
           status: newStatus,
           actor: 'agent',
           note: input.notes,
-          service_hours: input.service_hours ?? null
+          service_hours: serviceHours,
         });
 
         return { status: 'success', data: { request_id: ticket.id, status: newStatus } };
