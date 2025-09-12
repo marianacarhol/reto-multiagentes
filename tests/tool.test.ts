@@ -20,7 +20,7 @@ describe('Agent-03 Tool - Minimal Tests', () => {
         action: 'create',
         guest_id: 'G-1',
         room: '1205',
-        items: [{ name: 'Tostadas de Tinga' }],
+        items: [{ name: 'Chilaquiles Verdes' }],
         notes: 'sin cebolla, porfa',
       },
     };
@@ -55,6 +55,28 @@ describe('Agent-03 Tool - Minimal Tests', () => {
     expect(res.body.status).toBe('error');
     expect(res.body.error_code).toBe('VALIDATION_ERROR');
     expect(res.body.error_message).toBe('guest_id y room son requeridos (string) para crear ticket');
+  });
+
+    it('returns error when menu item is out of hours', async () => {
+    const input = {
+      input_data: {
+        action: 'create',
+        guest_id: 'G-1',
+        room: '1205',
+        items: [{ name: 'Tostadas de Tinga' }],
+        notes: 'sin cebolla, porfa',
+      },
+    };
+
+    const res = await request(server)
+      .post('/api/execute')
+      .send(input)
+      .expect(500);
+
+    
+    expect(res.body.status).toBe('error');
+    expect(res.body.error_code).toBe('ITEMS_UNAVAILABLE');
+    expect(res.body.error_message).toBe('Fuera de horario: Tostadas de Tinga');
   });
 });
 
