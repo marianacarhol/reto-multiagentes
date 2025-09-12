@@ -9,7 +9,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report
 
 CSV_PATH = "./ai_priority/tickets_priority_dataset.csv"
-MODEL_PATH = "priority_model.joblib"
+MODEL_PATH = "./ai_priority/priority_model.joblib"
 
 df = pd.read_csv(CSV_PATH)
 
