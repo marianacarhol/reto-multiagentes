@@ -8,7 +8,7 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report
 
-CSV_PATH = r"C:\reto_multiagentes\tools-reto-multiagentes\my-tool\ai_priority\tickets_priority_dataset.csv"
+CSV_PATH = "./ai_priority/tickets_priority_dataset.csv"
 MODEL_PATH = "priority_model.joblib"
 
 df = pd.read_csv(CSV_PATH)

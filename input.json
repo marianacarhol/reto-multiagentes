@@ -3,17 +3,9 @@
     "action": "create",
     "guest_id": "G-1",
     "room": "1205",
-    "type": "food",
-    "restaurant": "rest1",
-    "items": [
-      { "name": "Tostadas de tinga", "qty": 1 }
-    ]
-  },
-  "config": {
-    "enable_cross_sell": true,
-    "cross_sell_threshold": 1,
-    "cross_sell_per_category": true,
-    "cross_sell_per_category_count": 1,
-    "cross_sell_prefer_opposite": true
+    "type": "maintenance",
+    "issue": "Fuga de gas en la cocina",
+    "notes": "Si pueden antes de las 5 pm, porfa",
+    "service_hours": "10:00-12:00"
   }
 }
