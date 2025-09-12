@@ -438,9 +438,13 @@ async function addFeedback(rec: {
 async function decrementStock(items: Array<{id?:string; name:string; restaurant?:'rest1'|'rest2'; qty?:number}>){
   if (!items?.length) return;
   const menu = await dbMenuUnion();
+
+  const byId = new Map(menu.map(m => [m.id, m]));
+  const byName = new Map(menu.map(m => [normName(m.name), m]));
+
   for (const it of items) {
-    const row = it.id ? menu.find(m => m.id === it.id) : menu.find(m => m.name.toLowerCase() === it.name.toLowerCase());
-    if (!row) continue;
+    const row = it.id ? byId.get(it.id) : byName.get(normName(it.name));
+    if (!row) continue; // si no está, no descuenta
     const table = row.restaurant === 'rest1' ? 'rest1_menu_items' : 'rest2_menu_items';
     const qty = Math.max(1, it.qty ?? 1);
     const newStock = Math.max(0, (row.stock_current ?? 0) - qty);
@@ -638,8 +642,11 @@ const tool = createTool<AgentInput, AgentConfig>({
           if (!okWindow) return { status: 'error', error: { code: 'ACCESS_WINDOW_BLOCK', message: 'Fuera de ventana o DND activo' } };
 
           const rawItems = input.items ?? [];
-          if (!input.restaurant && rawItems.length === 0) {
-            return { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'Provee al menos un ítem' } };
+          if (rawItems.length === 0) {
+            return {
+              status: 'error',
+              error: { code: 'NEED_ITEMS', message: 'Debes proporcionar al menos un ítem del menú.' }
+            };
           }
 
           let resolved: ResolvedItem[] = [];
@@ -650,6 +657,20 @@ const tool = createTool<AgentInput, AgentConfig>({
             resolved = res.items; total = res.total; restSet = res.restSet;
           } catch (e:any) {
             return { status: 'error', error: { code: 'ITEMS_UNAVAILABLE', message: String(e?.message || e) } };
+          }
+
+          // Si el usuario especificó restaurant, todos los ítems deben pertenecer a ese restaurant
+          if (input.restaurant === 'rest1' || input.restaurant === 'rest2') {
+            const bad = resolved.find(r => r.restaurant !== input.restaurant);
+            if (bad) {
+              return {
+                status: 'error',
+                error: {
+                  code: 'RESTAURANT_MISMATCH',
+                  message: `El ítem "${bad.name}" pertenece a ${bad.restaurant}, pero se indicó ${input.restaurant}.`
+                }
+              };
+            }
           }
 
           // ---- Límite de gasto (precheck con ledger del día)
@@ -663,10 +684,9 @@ const tool = createTool<AgentInput, AgentConfig>({
 
           const anchor = (input.restaurant === 'rest1' || input.restaurant === 'rest2') ? input.restaurant : undefined;
           const ticketRestaurant: 'rest1'|'rest2'|'multi' =
-            input.restaurant === 'multi' ? 'multi'
-            : restSet.size > 1 ? 'multi'
-            : restSet.size === 1 ? Array.from(restSet)[0] as ('rest1'|'rest2')
-            : anchor ?? 'multi';
+            restSet.size > 1 ? 'multi' :
+            restSet.size === 1 ? Array.from(restSet)[0] as ('rest1'|'rest2') :
+            'multi'; // (no debería ocurrir porque ya exigimos items)
 
           // SIN IA: prioridad directa (o default 'normal')
           const id = `REQ-${Date.now()}`;
@@ -762,7 +782,7 @@ const tool = createTool<AgentInput, AgentConfig>({
             await decrementStock(ticket.items || []);
             const restSet = new Set<string>((ticket.items || []).map((i: any) => i.restaurant).filter(Boolean));
             for (const r of restSet) {
-              await rbAddHistory({ request_id: ticket.id, status: ticket.status, actor: r });
+              await rbAddHistory({ request_id: ticket.id, status: newStatus, actor: r });
             }
           } catch (e:any) {
             await rbAddHistory({
@@ -886,8 +906,7 @@ function envBool(name: string, def = true) {
   return ['1','true','t','yes','y','si','sí','on'].includes(raw);
 }
 
-// ===== INIT: postear ./input.json y luego decision interactiva o automática
-// ===== INIT: postear ./input.json y luego decision interactiva o automática
+// ===== INIT: create -> accept/reject -> complete/cancel -> feedback (solo askYesNo) =====
 async function runInitFlow(baseUrl: string) {
   try {
     const resolvedPath = path.resolve(process.env.INIT_JSON_PATH ?? './input.json');
@@ -903,42 +922,35 @@ async function runInitFlow(baseUrl: string) {
     console.log(`[INIT] input.json bytes=${raw.length}`);
     console.log(`[INIT] preview: ${raw.slice(0, 200).replace(/\n/g, ' ')}${raw.length > 200 ? '…' : ''}`);
 
-    let parsed = JSON.parse(raw);
-
-    // Soporte flexible: admitir tanto {…} como {"input_data":{…}}
-    const inputData = parsed?.input_data && typeof parsed.input_data === 'object'
-      ? parsed.input_data
-      : parsed;
-
+    const parsed = JSON.parse(raw);
+    const inputData = parsed?.input_data && typeof parsed.input_data === 'object' ? parsed.input_data : parsed;
     if (!inputData || typeof inputData !== 'object') {
       console.error('[INIT] El JSON no es un objeto válido ni contiene "input_data" objeto.');
       return;
     }
-    if (!inputData.action) {
-      console.log('[INIT] action no provisto; se usará "create" por defecto.');
-      inputData.action = 'create';
-    }
+    if (!inputData.action) inputData.action = 'create';
 
-    const headers: Record<string,string> = { 'Content-Type': 'application/json' };
-    if (envBool('API_KEY_AUTH', false) && process.env.VALID_API_KEYS) {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const apiKeyAuth = (process.env.API_KEY_AUTH ?? '').toLowerCase() === 'true';
+    if (apiKeyAuth && process.env.VALID_API_KEYS) {
       headers['X-API-Key'] = process.env.VALID_API_KEYS.split(',')[0]!.trim();
     }
 
-    // 1) Crear ticket
+    // 1) CREATE
     console.log('[INIT] POST /api/execute (create)…');
     const createResp = await fetch(`${baseUrl}/api/execute`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ input_data: inputData }),
     });
-    const createText = await createResp.text();
+    const createTxt = await createResp.text();
     let createJson: any = {};
-    try { createJson = JSON.parse(createText); } catch { /* deja el texto crudo para diagnosticar */ }
-    console.log(`[INIT] create status=${createResp.status} body=`, createJson || createText);
+    try { createJson = JSON.parse(createTxt); } catch {}
+    console.log('[INIT] create status=', createResp.status, createJson || createTxt);
 
     const requestId =
       createJson?.output_data?.request_id ||
-      createJson?.data?.request_id ||              // por si el tool responde plano
+      createJson?.data?.request_id ||
       createJson?.request_id;
 
     if (!requestId) {
@@ -947,34 +959,81 @@ async function runInitFlow(baseUrl: string) {
     }
     console.log(`[INIT] request_id=${requestId}`);
 
-    // 2) Decidir (interactivo o automático)
+    // 2) ACCEPT o REJECT
+    const interactive = ['1','true','t','yes','y','si','sí','on'].includes((process.env.INTERACTIVE_DECIDE ?? 'false').trim().toLowerCase());
+    const initDecisionRaw = (process.env.INIT_DECISION ?? 'accept').trim().toLowerCase();
     let decision: 'accept' | 'reject';
-    const interactive = envBool('INTERACTIVE_DECIDE', false);
-    const initDecisionRaw = (process.env.INIT_DECISION ?? 'accept').toLowerCase();
     if (interactive) {
       const yes = await askYesNo(`¿Aceptar pedido ${requestId}?`);
       decision = yes ? 'accept' : 'reject';
     } else {
       decision = initDecisionRaw === 'reject' ? 'reject' : 'accept';
     }
-    console.log(`[INIT] decision=${decision} (interactive=${interactive}, INIT_DECISION="${initDecisionRaw}")`);
 
-    const postData: AgentInput = { action: decision, request_id: requestId };
-
-    const actResp = await fetch(`${baseUrl}/api/execute`, {
+    console.log(`[INIT] decision=${decision}`);
+    const firstAct = await fetch(`${baseUrl}/api/execute`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ input_data: postData }),
+      body: JSON.stringify({ input_data: { action: decision, request_id: requestId } }),
     });
-    const actText = await actResp.text();
-    let actJson: any = {};
-    try { actJson = JSON.parse(actText); } catch { /* noop */ }
-    console.log(`[INIT] ${decision} status=${actResp.status} body=`, actJson || actText);
+    const firstTxt = await firstAct.text();
+    let firstJson: any = {};
+    try { firstJson = JSON.parse(firstTxt); } catch {}
+    console.log(`[INIT] ${decision} status=${firstAct.status} body=`, firstJson || firstTxt);
 
-  } catch (e:any) {
+    // 3) Si fue ACCEPT, COMPLETE o CANCEL
+    let finalAction: 'complete' | 'cancel' | 'reject' = decision === 'reject' ? 'reject' : 'cancel';
+    if (decision === 'accept') {
+      const done = await askYesNo(`¿Se completó el pedido ${requestId}?`);
+      finalAction = done ? 'complete' : 'cancel';
+
+      const secondAct = await fetch(`${baseUrl}/api/execute`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ input_data: { action: finalAction, request_id: requestId } }),
+      });
+      const secondTxt = await secondAct.text();
+      let secondJson: any = {};
+      try { secondJson = JSON.parse(secondTxt); } catch {}
+      console.log(`[INIT] ${finalAction} status=${secondAct.status} body=`, secondJson || secondTxt);
+    }
+
+    // 4) Feedback (opcional). Solo askYesNo; si dice que sí, pedimos texto inline sin helper extra.
+    const wantsFeedback = await askYesNo('¿Quieres agregar un comentario/feedback?');
+    if (wantsFeedback) {
+      // Abrimos readline aquí mismo (inline).
+      const comment: string = await new Promise((resolve) => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        rl.question('Comentario: ', (answer) => {
+          rl.close();
+          resolve(String(answer ?? '').trim());
+        });
+      });
+
+      if (comment) {
+        const fbResp = await fetch(`${baseUrl}/api/execute`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            input_data: { action: 'feedback', request_id: requestId, service_feedback: comment }
+          }),
+        });
+        const fbTxt = await fbResp.text();
+        let fbJson: any = {};
+        try { fbJson = JSON.parse(fbTxt); } catch {}
+        console.log(`[INIT] feedback status=${fbResp.status} body=`, fbJson || fbTxt);
+      } else {
+        console.log('[INIT] feedback omitido (vacío).');
+      }
+    } else {
+      console.log('[INIT] feedback saltado por usuario.');
+    }
+
+  } catch (e: any) {
     console.error('[INIT] flow error:', e?.message || e);
   }
 }
+
 
 // ===== Server bootstrap =====
 async function main(){

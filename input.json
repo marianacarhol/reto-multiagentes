@@ -1,10 +1,9 @@
 {
-  "input_data": {
     "action": "create",
-    "guest_id": "G_1",
-    "room": "101",
-    "type": "maintenance",
-    "issue": "La regadera tiene fuga y el agua sale muy fría",
-    "notes": "Si pueden antes de las 5 pm, porfa"
+    "guest_id": "G-1",
+    "room": "1205",
+    "items": [
+      { "name": "Sushi Bonle" }
+    ],
+    "notes": "con shipotle"
   }
-}
