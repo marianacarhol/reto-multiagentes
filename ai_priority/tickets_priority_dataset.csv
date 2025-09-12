@@ -1,0 +1,201 @@
+request_id,text,domain,vip,spend30d,eta_to_sla_min,label
+1,"Se rompió la tubería y hay agua en el piso",m,0,120.5,-10,high
+2,"Humo saliendo del ventilador del baño",m,1,340.0,-5,high
+3,"Fuga de gas en la cocina",m,0,80.2,-20,high
+4,"Chispas en el enchufe de la pared",m,0,55.0,15,high
+5,"Incendio en la estufa del comedor",m,1,900.0,-25,high
+6,"Elevador detenido con huéspedes adentro",m,0,300.0,-12,high
+7,"No hay luz en todo el piso 2",m,0,230.5,5,high
+8,"Puerta de emergencia bloqueada",m,1,400.0,-18,high
+9,"Detector de humo activado por posible fuego",m,0,120.0,-8,high
+10,"Grieta en el techo con riesgo de caída",m,0,45.0,10,high
+11,"Tubería rota inunda pasillo principal",m,1,600.0,-30,high
+12,"Ruido fuerte y humo en generador eléctrico",m,0,50.0,-15,high
+13,"Pared con fuga eléctrica visible",m,0,20.0,12,high
+14,"Explosión pequeña en cuarto de calderas",m,1,700.0,-22,high
+15,"Transformador sobrecalentado en azotea",m,0,35.0,-5,high
+16,"Inundación en sótano por drenaje tapado",m,0,80.0,-18,high
+17,"Cristal de ventana roto con riesgo de accidente",m,1,500.0,20,high
+18,"Corto circuito en tablero eléctrico",m,0,90.0,-10,high
+19,"Olor fuerte a gas en pasillo",m,0,60.0,-12,high
+20,"Motor de bomba de agua echando humo",m,0,75.0,-7,high
+21,"El aire acondicionado no enfría bien",m,0,40.0,30,medium
+22,"La televisión no prende",m,0,15.0,45,medium
+23,"La regadera gotea",m,1,250.0,60,medium
+24,"El control remoto no funciona",m,0,5.0,70,medium
+25,"El refrigerador hace ruido raro",m,0,30.0,90,medium
+26,"La chapa de la puerta está floja",m,0,10.0,120,medium
+27,"Se apagó una lámpara del pasillo",m,1,80.0,40,medium
+28,"Ruido fuerte en el extractor de aire",m,0,20.0,55,medium
+29,"Puerta corrediza atorada",m,0,50.0,60,medium
+30,"Ventana no cierra bien",m,0,15.0,100,medium
+31,"La calefacción tarda en encender",m,1,200.0,75,medium
+32,"Fuga pequeña en lavabo",m,0,10.0,65,medium
+33,"Piso resbaladizo en baño por filtración",m,0,25.0,50,medium
+34,"Persiana dañada no sube",m,0,5.0,80,medium
+35,"Silla de escritorio rota",m,0,10.0,120,medium
+36,"Puerta rechina al abrir",m,0,5.0,100,medium
+37,"Mesa tambaleante en la habitación",m,0,12.0,110,medium
+38,"Aire sale con mal olor del ventilador",m,0,18.0,90,medium
+39,"Balcon con barandal flojo",m,1,300.0,40,medium
+40,"Cama con pata suelta",m,0,20.0,70,medium
+41,"Cambiar foco en la habitación 210",m,0,0.0,150,low
+42,"Solicitan limpieza extra en baño",m,0,5.0,160,low
+43,"Retirar basura acumulada en pasillo",m,0,2.0,180,low
+44,"Revisar timbre de habitación 303",m,0,0.0,140,low
+45,"Colocar cuadro en recepción",m,0,0.0,200,low
+46,"Ajustar cortina que no cierra bien",m,0,0.0,130,low
+47,"Quitar mancha de pintura en la pared",m,0,0.0,160,low
+48,"Reemplazar alfombra manchada",m,0,10.0,180,low
+49,"Lustrar barandal de escaleras",m,0,0.0,200,low
+50,"Pintar pared rayada en pasillo",m,0,0.0,190,low
+51,"Aceitar bisagras de puerta",m,0,0.0,170,low
+52,"Cambiar batería a reloj de pared",m,0,0.0,200,low
+53,"Revisar estante flojo en clóset",m,0,0.0,160,low
+54,"Pulir piso de mármol en lobby",m,0,0.0,180,low
+55,"Colocar nuevo tapete en entrada",m,0,0.0,190,low
+56,"Lavar ventanas exteriores",m,0,0.0,200,low
+57,"Reemplazar cortina decorativa",m,0,0.0,140,low
+58,"Revisar decoración de lámpara",m,0,0.0,180,low
+59,"Colocar señalización en pasillo",m,0,0.0,200,low
+60,"Reemplazar pomo decorativo",m,0,0.0,160,low
+61,"Inodoro tarda en vaciarse",m,0,10.0,90,medium
+62,"Grifo gotea en lavabo",m,0,5.0,110,medium
+63,"Puerta de clóset no cierra bien",m,0,8.0,120,medium
+64,"Techo con humedad ligera",m,0,20.0,80,medium
+65,"Balón de agua caliente hace ruido",m,0,30.0,60,medium
+66,"Puerta del baño rechina",m,0,0.0,140,low
+67,"Pintura descascarada en pared",m,0,0.0,180,low
+68,"Cambiar focos fundidos en pasillo",m,0,0.0,200,low
+69,"Alfombra necesita aspirado",m,0,0.0,200,low
+70,"Retirar hojas de la terraza",m,0,0.0,190,low
+71,"Barandal del balcón flojo",m,1,200.0,30,medium
+72,"Ventilador hace ruido intermitente",m,0,15.0,100,medium
+73,"Tubo de desagüe con fuga leve",m,0,25.0,70,medium
+74,"Cable expuesto en pasillo",m,1,350.0,-5,high
+75,"Alarma contra incendios sin batería",m,0,30.0,-15,high
+76,"Extintor descargado en lobby",m,0,10.0,-8,high
+77,"Detector de humo roto",m,0,0.0,-12,high
+78,"Elevador se detuvo brevemente",m,1,400.0,10,high
+79,"Sistema de ventilación expulsa humo",m,0,0.0,-20,high
+80,"Fuga de agua cerca de instalaciones eléctricas",m,0,100.0,-18,high
+81,"Caldera con temperatura anormal",m,0,50.0,-5,high
+82,"Puerta de emergencia no abre",m,1,600.0,-25,high
+83,"Cristal roto en entrada principal",m,0,0.0,15,high
+84,"Se cayó plafón del techo",m,0,0.0,-10,high
+85,"Cortocircuito en lámpara",m,0,0.0,-5,high
+86,"Balcon con riesgo de caída",m,1,500.0,-12,high
+87,"Cable chisporroteando en sótano",m,0,0.0,-20,high
+88,"Motor de ventilación con humo",m,0,0.0,-15,high
+89,"Inundación en baño de huéspedes",m,0,80.0,-10,high
+90,"Huésped atrapado en elevador",m,1,700.0,-30,high
+91,"Puerta automática no cierra",m,0,20.0,60,medium
+92,"Aire acondicionado con mal olor",m,0,10.0,70,medium
+93,"Ventana no abre correctamente",m,0,15.0,90,medium
+94,"Piso con azulejo suelto",m,0,0.0,100,medium
+95,"Mesa con superficie rayada",m,0,0.0,120,medium
+96,"Espejo con mancha permanente",m,0,0.0,200,low
+97,"Decoración caída en pasillo",m,0,0.0,180,low
+98,"Reemplazar bombilla decorativa",m,0,0.0,190,low
+99,"Revisar alfombra doblada",m,0,0.0,160,low
+100,"Quitar polvo de ventilas",m,0,0.0,200,low
+101,"Riel de cortina flojo",m,0,0.0,140,low
+102,"Ajustar silla giratoria",m,0,0.0,180,low
+103,"Pulir manija de puerta",m,0,0.0,200,low
+104,"Revisar pintura de techo",m,0,0.0,150,low
+105,"Ventana con marco sucio",m,0,0.0,200,low
+106,"Puerta golpea al cerrar",m,0,0.0,170,low
+107,"Pared con grietas pequeñas",m,0,0.0,160,low
+108,"Foco parpadea levemente",m,0,0.0,180,low
+109,"Caja de fusibles con tapa floja",m,0,10.0,80,medium
+110,"Puerta de baño con seguro atorado",m,0,15.0,60,medium
+111,"Cerradura difícil de girar",m,0,5.0,100,medium
+112,"Lavamanos tapado parcialmente",m,0,12.0,90,medium
+113,"Filtración leve en techo",m,0,20.0,75,medium
+114,"Azulejo roto en ducha",m,0,15.0,120,medium
+115,"Ventilación no uniforme",m,0,25.0,110,medium
+116,"Olor a humedad en clóset",m,0,10.0,95,medium
+117,"Interruptor flojo en pared",m,0,5.0,80,medium
+118,"Inodoro con fuga lenta",m,0,18.0,100,medium
+119,"Persiana no sube completamente",m,0,10.0,120,medium
+120,"Cortina descolgada",m,0,0.0,110,medium
+121,"Piso con rayón superficial",m,0,0.0,180,low
+122,"Sillón con tapicería sucia",m,0,0.0,200,low
+123,"Mesa auxiliar floja",m,0,0.0,190,low
+124,"Ventilador de techo polvoso",m,0,0.0,180,low
+125,"Puerta del balcón necesita aceite",m,0,0.0,200,low
+126,"Riel de cortina oxidado",m,0,0.0,160,low
+127,"Pared con mancha leve",m,0,0.0,170,low
+128,"Barra de toalla floja",m,0,0.0,150,low
+129,"Azulejo con mancha de cal",m,0,0.0,180,low
+130,"Lámpara de escritorio con polvo",m,0,0.0,200,low
+131,"Caldera con presión inestable",m,0,30.0,-10,high
+132,"Panel eléctrico con sobrecalentamiento",m,1,500.0,-15,high
+133,"Explosión en tablero de fusibles",m,0,0.0,-20,high
+134,"Transformador eléctrico humeando",m,0,40.0,-12,high
+135,"Elevador detenido por falla eléctrica",m,1,700.0,-25,high
+136,"Inundación en sótano de mantenimiento",m,0,90.0,-18,high
+137,"Chispas en lámpara de pasillo",m,0,20.0,-5,high
+138,"Humo en cuarto de máquinas",m,0,60.0,-8,high
+139,"Pared electrificada en baño",m,0,0.0,-30,high
+140,"Motor de bomba se incendió",m,1,400.0,-22,high
+141,"Ventana no sella bien",m,0,15.0,100,medium
+142,"Puerta corrediza no cierra completo",m,0,10.0,120,medium
+143,"Llave del lavabo dura al girar",m,0,5.0,90,medium
+144,"Goteo leve en tubería",m,0,20.0,80,medium
+145,"Extractor con ruido molesto",m,0,12.0,70,medium
+146,"Clóset con bisagra floja",m,0,0.0,100,medium
+147,"Aire acondicionado enfría poco",m,0,25.0,60,medium
+148,"Ventana con marco flojo",m,0,10.0,95,medium
+149,"Inodoro con fuga en base",m,0,8.0,120,medium
+150,"Persiana desajustada",m,0,0.0,110,medium
+151,"Puerta golpea pared al abrir",m,0,0.0,200,low
+152,"Manija de clóset floja",m,0,0.0,180,low
+153,"Pequeña mancha de humedad en esquina",m,0,0.0,190,low
+154,"Silla con rayón superficial",m,0,0.0,160,low
+155,"Puerta necesita pintura",m,0,0.0,170,low
+156,"Ventana con vidrio opaco",m,0,0.0,200,low
+157,"Cortina con arruga visible",m,0,0.0,180,low
+158,"Espejo con marco sucio",m,0,0.0,200,low
+159,"Mesa auxiliar rayada",m,0,0.0,190,low
+160,"Tirador de cajón flojo",m,0,0.0,150,low
+161,"Bomba de agua dejó de funcionar",m,1,600.0,-12,high
+162,"Sistema contra incendios no responde",m,0,0.0,-20,high
+163,"Cortocircuito en cuarto eléctrico",m,0,50.0,-10,high
+164,"Elevador con humo en cabina",m,1,800.0,-25,high
+165,"Panel eléctrico sin protección",m,0,0.0,-15,high
+166,"Fuga de agua cerca de cableado",m,0,90.0,-18,high
+167,"Motor de ventilador quemado",m,0,30.0,-5,high
+168,"Humo denso en sótano",m,0,0.0,-8,high
+169,"Puerta de emergencia trabada",m,1,500.0,-22,high
+170,"Olor fuerte a gas en cocina",m,0,70.0,-12,high
+171,"Puerta de baño rechina al cerrar",m,0,0.0,150,medium
+172,"Azulejo flojo en pasillo",m,0,0.0,120,medium
+173,"Persiana no baja completamente",m,0,0.0,110,medium
+174,"Silla de escritorio desajustada",m,0,0.0,100,medium
+175,"Mesa tambaleante",m,0,0.0,120,medium
+176,"Ventilador de techo con ruido",m,0,0.0,80,medium
+177,"Puerta con cerradura dura",m,0,0.0,90,medium
+178,"Pequeña filtración en ventana",m,0,0.0,95,medium
+179,"Cajón de buró atorado",m,0,0.0,110,medium
+180,"Interruptor de luz flojo",m,0,0.0,100,medium
+181,"Pintura descascarada en muro",m,0,0.0,200,low
+182,"Mancha en alfombra del pasillo",m,0,0.0,180,low
+183,"Mesa auxiliar con polvo",m,0,0.0,200,low
+184,"Ventana necesita limpieza",m,0,0.0,200,low
+185,"Puerta principal con rayón",m,0,0.0,170,low
+186,"Cuadro torcido en pared",m,0,0.0,160,low
+187,"Espejo con manchas leves",m,0,0.0,190,low
+188,"Cortina polvosa",m,0,0.0,200,low
+189,"Decoración caída en lobby",m,0,0.0,180,low
+190,"Sillón con desgaste visible",m,0,0.0,200,low
+191,"Generador se apagó inesperadamente",m,1,900.0,-30,high
+192,"Explosión en caldera central",m,0,0.0,-25,high
+193,"Sistema eléctrico sobrecargado",m,0,100.0,-15,high
+194,"Corto en lámpara de pasillo",m,0,0.0,-10,high
+195,"Humo saliendo del tablero eléctrico",m,0,0.0,-18,high
+196,"Elevador atrapado entre pisos",m,1,700.0,-20,high
+197,"Transformador explotó en azotea",m,0,0.0,-30,high
+198,"Fuga de agua mayor en cisterna",m,0,80.0,-12,high
+199,"Pared con corriente eléctrica",m,0,0.0,-22,high
+200,"Motor de bomba sobrecalentado",m,0,60.0,-8,high
