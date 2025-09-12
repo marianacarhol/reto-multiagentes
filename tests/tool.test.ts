@@ -1,250 +1,55 @@
 import request from 'supertest';
-import myToolTool from '../src/index';
+import tool from '../src/index';
 
-describe('MyTool Tool', () => {
-  let app: any;
+describe('Agent-03 Tool - Minimal Tests', () => {
+  let server: any;
 
   beforeAll(async () => {
-    app = myToolTool.getApp();
+    // Arranca el tool en memoria
+    await tool.start({ port: 0 }); // puerto 0 evita conflictos
+    server = tool.server; // instancia del server
   });
 
   afterAll(async () => {
-    await myToolTool.stop();
+    await tool.stop();
   });
 
-  describe('Health Check', () => {
-    it('should return healthy status', async () => {
-      const response = await request(app)
-        .get('/health')
-        .expect(200);
+  it('executes successfully with valid input', async () => {
+    const input = {
+        action: 'create',
+        guest_id: 'G-1',
+        room: '1205',
+        items: [{ name: 'Tostadas de Tinga' }],
+        notes: 'sin cebolla, porfa',
+    };
 
-      expect(response.body).toMatchObject({
-        status: 'healthy',
-        version: '1.0.0',
-        tool_metadata: {
-          name: 'my-tool',
-          description: expect.any(String),
-          capabilities: expect.any(Array),
-        },
-        uptime_seconds: expect.any(Number),
-      });
-    });
+    const res = await request(server)
+      .post('/api/execute')
+      .send(input)
+      .expect(200);
+
+    expect(res.body.status).toBe('success');
+    expect(res.body.data).toHaveProperty('request_id');
+    expect(res.body.data.domain).toBe('rb');
+    expect(res.body.data.cross_sell_suggestions).toBeInstanceOf(Array);
   });
 
-  describe('Tool Execution', () => {
-    it('should execute successfully with valid input', async () => {
-      const input = {
-        input_data: {
-          message: 'Hello, World!',
-          count: 2,
-          uppercase: true,
-        },
-      };
+  it('returns error when missing required fields', async () => {
+    const input = {
+      input_data: {
+        action: 'create',
+        // guest_id y room faltan
+        items: [{ name: 'Tostadas de Tinga' }],
+      },
+    };
 
-      const response = await request(app)
-        .post('/execute')
-        .send(input)
-        .expect(200);
+    const res = await request(server)
+      .post('/api/execute')
+      .send(input)
+      .expect(400);
 
-      expect(response.body).toMatchObject({
-        execution_id: expect.any(String),
-        status: 'success',
-        output_data: {
-          processed_message: 'HELLO, WORLD! HELLO, WORLD!',
-          original_message: 'Hello, World!',
-          transformations: {
-            uppercase: true,
-            count: 2,
-          },
-        },
-        execution_time_ms: expect.any(Number),
-        timestamp: expect.any(String),
-      });
-    });
-
-    it('should handle missing required fields', async () => {
-      const input = {
-        input_data: {
-          // Missing required 'message' field
-          count: 1,
-        },
-      };
-
-      const response = await request(app)
-        .post('/execute')
-        .send(input)
-        .expect(400);
-
-      expect(response.body).toMatchObject({
-        status: 'error',
-        error_code: 'VALIDATION_ERROR',
-        error_message: expect.stringContaining('Required field'),
-      });
-    });
-
-    it('should handle invalid input types', async () => {
-      const input = {
-        input_data: {
-          message: 'Hello',
-          count: 'invalid', // Should be a number
-        },
-      };
-
-      const response = await request(app)
-        .post('/execute')
-        .send(input)
-        .expect(400);
-
-      expect(response.body).toMatchObject({
-        status: 'error',
-        error_code: 'VALIDATION_ERROR',
-        error_message: expect.stringContaining('must be of type number'),
-      });
-    });
-
-    it('should respect field constraints', async () => {
-      const input = {
-        input_data: {
-          message: 'Hello',
-          count: 15, // Exceeds max value of 10
-        },
-      };
-
-      const response = await request(app)
-        .post('/execute')
-        .send(input)
-        .expect(400);
-
-      expect(response.body).toMatchObject({
-        status: 'error',
-        error_code: 'VALIDATION_ERROR',
-        error_message: expect.stringContaining('must be at most 10'),
-      });
-    });
-
-    it('should use default values when fields are omitted', async () => {
-      const input = {
-        input_data: {
-          message: 'Hello',
-          // count and uppercase will use defaults
-        },
-      };
-
-      const response = await request(app)
-        .post('/execute')
-        .send(input)
-        .expect(200);
-
-      expect(response.body.output_data).toMatchObject({
-        processed_message: 'Hello',
-        transformations: {
-          uppercase: false, // default value
-          count: 1, // default value
-        },
-      });
-    });
-
-    it('should handle empty message gracefully', async () => {
-      const input = {
-        input_data: {
-          message: '',
-        },
-      };
-
-      const response = await request(app)
-        .post('/execute')
-        .send(input)
-        .expect(400);
-
-      expect(response.body).toMatchObject({
-        status: 'error',
-        error_code: 'VALIDATION_ERROR',
-        error_message: expect.stringContaining('must be at least 1 characters'),
-      });
-    });
-
-    it('should handle very long messages', async () => {
-      const longMessage = 'A'.repeat(1001); // Exceeds maxLength of 1000
-      const input = {
-        input_data: {
-          message: longMessage,
-        },
-      };
-
-      const response = await request(app)
-        .post('/execute')
-        .send(input)
-        .expect(400);
-
-      expect(response.body).toMatchObject({
-        status: 'error',
-        error_code: 'VALIDATION_ERROR',
-        error_message: expect.stringContaining('must be at most 1000 characters'),
-      });
-    });
-  });
-
-  describe('Error Handling', () => {
-    it('should handle malformed JSON', async () => {
-      const response = await request(app)
-        .post('/execute')
-        .send('invalid json')
-        .expect(400);
-
-      expect(response.body).toMatchObject({
-        status: 'error',
-        error_code: expect.any(String),
-        error_message: expect.any(String),
-      });
-    });
-
-    it('should handle missing request body', async () => {
-      const response = await request(app)
-        .post('/execute')
-        .expect(400);
-
-      expect(response.body).toMatchObject({
-        status: 'error',
-        error_code: 'VALIDATION_ERROR',
-        error_message: expect.stringContaining('Request body must be a valid JSON object'),
-      });
-    });
-  });
-
-  describe('Statistics and Metadata', () => {
-    it('should track execution statistics', () => {
-      const stats = myToolTool.getStats();
-      
-      expect(stats).toMatchObject({
-        executionCount: expect.any(Number),
-        errorCount: expect.any(Number),
-        avgExecutionTime: expect.any(Number),
-        errorRate: expect.any(Number),
-        uptime: expect.any(Number),
-      });
-    });
-
-    it('should include metadata in responses', async () => {
-      const input = {
-        input_data: {
-          message: 'Test',
-        },
-        metadata: {
-          user_id: 'test-user',
-          custom_field: 'custom_value',
-        },
-      };
-
-      const response = await request(app)
-        .post('/execute')
-        .send(input)
-        .expect(200);
-
-      expect(response.body.output_data.metadata).toMatchObject({
-        execution_id: expect.any(String),
-        timestamp: expect.any(String),
-        tool_version: '1.0.0',
-      });
-    });
+    expect(res.body.status).toBe('error');
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
   });
 });
+

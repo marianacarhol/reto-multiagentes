@@ -1,9 +1,9 @@
 // Jest setup file for common test configuration
 
-// Increase timeout for integration tests
+// Aumentar timeout para tests de integración
 jest.setTimeout(10000);
 
-// Mock console.log during tests to reduce noise
+// Mock de console.log y console.error para reducir ruido
 const originalConsoleLog = console.log;
 const originalConsoleError = console.error;
 
@@ -17,9 +17,9 @@ afterAll(() => {
   console.error = originalConsoleError;
 });
 
-// Global test utilities
+// Utilidades globales para tests
 global.testUtils = {
-  // Helper to create valid input data
+  // Crear input válido
   createValidInput: (overrides = {}) => ({
     input_data: {
       message: 'Test message',
@@ -29,18 +29,18 @@ global.testUtils = {
     },
   }),
 
-  // Helper to create invalid input data
+  // Crear input inválido
   createInvalidInput: (invalidField: string, invalidValue: any) => {
     const input = global.testUtils.createValidInput();
     input.input_data[invalidField] = invalidValue;
     return input;
   },
 
-  // Helper to wait for async operations
+  // Esperar un tiempo (async)
   wait: (ms: number) => new Promise(resolve => setTimeout(resolve, ms)),
 };
 
-// Type definitions for global test utilities
+// Tipos globales
 declare global {
   namespace globalThis {
     var testUtils: {
@@ -50,3 +50,4 @@ declare global {
     };
   }
 }
+

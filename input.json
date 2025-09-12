@@ -3,9 +3,11 @@
     "action": "create",
     "guest_id": "G-1",
     "room": "1205",
-    "type": "maintenance",
-    "issue": "La regadera tiene fuga",
-    "notes": "Si pueden antes de las 5 pm, porfa",
-    "service_hours": "10:00-12:00"
+    "items": [
+      { "name": "Tostadas de Tinga" }
+    ],
+    "notes": "sin cebolla, porfa"
   }
 }
+
+
