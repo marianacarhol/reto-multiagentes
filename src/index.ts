@@ -230,6 +230,43 @@ type MenuRow = {
   cross_sell_items?: string[];
 };
 
+type GuestRow = {
+  id: string;
+  nombre?: string | null;
+  room?: string | null;
+  spend_limit?: number | null;
+};
+
+async function dbGetGuestById(guest_id: string): Promise<GuestRow | null> {
+  const { data, error } = await supabase
+    .from('guests')
+    .select('id, nombre, room, spend_limit')
+    .eq('id', guest_id)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as GuestRow) ?? null;
+}
+
+async function dbValidateGuestAndRoom(guest_id: string, room: string) {
+  const g = await dbGetGuestById(guest_id);
+  if (!g) {
+    const err: any = new Error('GUEST_NOT_FOUND');
+    err.code = 'GUEST_NOT_FOUND';
+    err.message = `Huésped "${guest_id}" no existe`;
+    throw err;
+  }
+  // si tu columna room puede venir null, permitimos crear sólo si input.room también es null/igual
+  const dbRoom = (g.room ?? '').trim();
+  const inRoom = (room ?? '').trim();
+  if (dbRoom && inRoom && dbRoom !== inRoom) {
+    const err: any = new Error('ROOM_MISMATCH');
+    err.code = 'ROOM_MISMATCH';
+    err.message = `La habitación no coincide (guest=${dbRoom}, input=${inRoom})`;
+    throw err;
+  }
+  return g; // por si luego quieres usar spend_limit, nombre, etc.
+}
+
 // ===== Spend helpers =====
 async function dbGetSpentToday(guest_id: string){
   const start = new Date();
@@ -598,6 +635,18 @@ const tool = createTool<AgentInput, AgentConfig>({
     if (action === 'create') {
       if (!guest_id || !room || typeof guest_id !== 'string' || typeof room !== 'string') {
         return { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'guest_id y room son requeridos (string) para crear ticket' } };
+      }
+    }
+
+    // --- VALIDAR HUESPED/ROOM CONTRA BD ---
+    if (action === 'create') {
+      try {
+        await dbValidateGuestAndRoom(guest_id!, room!);
+      } catch (e: any) {
+        return {
+          status: 'error',
+          error: { code: e?.code || 'GUEST_VALIDATION', message: e?.message || 'Validación de huésped falló' }
+        };
       }
     }
 
