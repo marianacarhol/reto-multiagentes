@@ -685,7 +685,7 @@ const tool = createTool<AgentInput, AgentConfig>({
 
       // CREATE
       if (action === 'create') {
-        // ======== ROOM SERVICE (food/beverage) — SIN IA ========
+        // ======== ROOM SERVICE (food/beverage) ========
         if (type === 'food' || type === 'beverage') {
           const okWindow = withinWindow(input.now, input.access_window, { start: config.accessWindowStart, end: config.accessWindowEnd }, input.do_not_disturb);
           if (!okWindow) return { status: 'error', error: { code: 'ACCESS_WINDOW_BLOCK', message: 'Fuera de ventana o DND activo' } };
@@ -735,11 +735,39 @@ const tool = createTool<AgentInput, AgentConfig>({
           const ticketRestaurant: 'rest1'|'rest2'|'multi' =
             restSet.size > 1 ? 'multi' :
             restSet.size === 1 ? Array.from(restSet)[0] as ('rest1'|'rest2') :
-            'multi'; // (no debería ocurrir porque ya exigimos items)
+            'multi';
 
-          // SIN IA: prioridad directa (o default 'normal')
           const id = `REQ-${Date.now()}`;
           const priorityLabelRB = input.priority ?? 'normal';
+
+          // ---- CROSS-SELL (opcional)
+          let crossSell: Array<{restaurant:'rest1'|'rest2'; id:string; name:string; price:number; category:'food'|'beverage'|'dessert'}> = [];
+          if (config.enable_cross_sell !== false) {
+            // Preferir “opuesto” cuando el pedido viene de un solo restaurant
+            const preferOppositeOf =
+              (config.cross_sell_prefer_opposite && (input.restaurant === 'rest1' || input.restaurant === 'rest2'))
+                ? (input.restaurant === 'rest1' ? 'rest2' : 'rest1')
+                : undefined;
+
+            const menu = await dbMenuUnion();
+            crossSell = pickCrossSellByCategory(
+              menu,
+              resolved, // lo que ya eligió el huésped
+              {
+                nowHHMM,
+                perCategoryCount: Math.max(1, Math.min(3, config.cross_sell_per_category_count ?? 1)),
+                preferOppositeOf: preferOppositeOf as ('rest1'|'rest2'|undefined),
+                explicitType: type, // 'food' o 'beverage'
+                // si ya trae p.ej. food, intenta sugerir categorías distintas cuando está activo per-category
+                forbidSameCategoryIfPresent: !!config.cross_sell_per_category
+              }
+            );
+
+            // Si quieres umbral mínimo de ítems comprados antes de sugerir
+            const threshold = Number(config.cross_sell_threshold ?? 1);
+            if ((resolved?.length ?? 0) < threshold) crossSell = [];
+          }
+          const crossSellNames = crossSell.map(s => s.name);
 
           await rbCreateTicket({
             id,
@@ -759,7 +787,18 @@ const tool = createTool<AgentInput, AgentConfig>({
             actor: 'system'
           });
 
-          return { status: 'success', data: { request_id: id, domain: 'rb', type, area, status: 'CREADO', message: 'Ticket creado. Usa action "accept" o "reject".' } };
+          return {
+            status: 'success',
+            data: {
+              request_id: id,
+              domain: 'rb',
+              type,
+              area,
+              status: 'CREADO',
+              message: 'Ticket creado. Usa action "accept" o "reject".',
+              cross_sell_suggestions: crossSellNames
+            }
+          };
         }
 
         // ======== MANTENIMIENTO — CON IA ========
@@ -1016,7 +1055,11 @@ async function runInitFlow(baseUrl: string) {
     const createTxt = await createResp.text();
     let createJson: any = {};
     try { createJson = JSON.parse(createTxt); } catch {}
-    console.log('[INIT] create status=', createResp.status, createJson || createTxt);
+    console.log(
+      '[INIT] create status=',
+      createResp.status,
+      JSON.stringify(createJson, null, 2)
+    );
 
     const requestId =
       createJson?.output_data?.request_id ||
@@ -1049,7 +1092,10 @@ async function runInitFlow(baseUrl: string) {
     const firstTxt = await firstAct.text();
     let firstJson: any = {};
     try { firstJson = JSON.parse(firstTxt); } catch {}
-    console.log(`[INIT] ${decision} status=${firstAct.status} body=`, firstJson || firstTxt);
+    console.log(
+      `[INIT] ${decision} status=${firstAct.status} body=`,
+      JSON.stringify(firstJson, null, 2)
+    );
 
     // 3) Si fue ACCEPT, COMPLETE o CANCEL
     let finalAction: 'complete' | 'cancel' | 'reject' = decision === 'reject' ? 'reject' : 'cancel';
@@ -1065,7 +1111,10 @@ async function runInitFlow(baseUrl: string) {
       const secondTxt = await secondAct.text();
       let secondJson: any = {};
       try { secondJson = JSON.parse(secondTxt); } catch {}
-      console.log(`[INIT] ${finalAction} status=${secondAct.status} body=`, secondJson || secondTxt);
+      console.log(
+        `[INIT] ${finalAction} status=${secondAct.status} body=`,
+        JSON.stringify(secondJson, null, 2)
+      );
     }
 
     // 4) Feedback (opcional). Solo askYesNo; si dice que sí, pedimos texto inline sin helper extra.
@@ -1091,7 +1140,10 @@ async function runInitFlow(baseUrl: string) {
         const fbTxt = await fbResp.text();
         let fbJson: any = {};
         try { fbJson = JSON.parse(fbTxt); } catch {}
-        console.log(`[INIT] feedback status=${fbResp.status} body=`, fbJson || fbTxt);
+        console.log(
+          `[INIT] feedback status=${fbResp.status} body=`,
+          JSON.stringify(fbJson, null, 2)
+        );
       } else {
         console.log('[INIT] feedback omitido (vacío).');
       }

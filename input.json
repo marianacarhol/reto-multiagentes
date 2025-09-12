@@ -3,13 +3,17 @@
     "action": "create",
     "guest_id": "G-1",
     "room": "1205",
-    "type": "maintenance",
-    "issue": "El aire acondicionado no enfría bien",
-    "severity": "medium",
-    "access_window": {
-      "start": "09:00",
-      "end": "12:30"
-    },
-    "notes": "Favor de revisar lo antes posible"
+    "type": "food",
+    "restaurant": "rest1",
+    "items": [
+      { "name": "Tostadas de tinga", "qty": 1 }
+    ]
+  },
+  "config": {
+    "enable_cross_sell": true,
+    "cross_sell_threshold": 1,
+    "cross_sell_per_category": true,
+    "cross_sell_per_category_count": 1,
+    "cross_sell_prefer_opposite": true
   }
 }
