@@ -294,7 +294,7 @@ describe('Agent-03 Tool - Minimal Tests', () => {
     await tool.stop();
   });
 
-  it('✅ ejecuta con éxito con input válido', async () => {
+  it('ejecuta con éxito con input válido', async () => {
     const input = {
       input_data: {
         action: 'create',
@@ -312,7 +312,7 @@ describe('Agent-03 Tool - Minimal Tests', () => {
     expect(res.body.data.domain).toBe('rb');
   });
 
-  it('❌ devuelve error si faltan guest_id/room', async () => {
+  it('devuelve error si faltan guest_id/room', async () => {
     const badInput = {
       input_data: { action: 'create', items: [{ name: 'Tostadas de Tinga' }] },
     };
