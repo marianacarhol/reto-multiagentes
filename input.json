@@ -4,10 +4,9 @@
     "guest_id": "G-1",
     "room": "1205",
     "items": [
-      { "name": "Tostadas de Tinga" }
+      { "name": "Tacos al Pastor" },
+      { "name": "Refresco" }
     ],
     "notes": "sin cebolla, porfa"
   }
 }
-
-
